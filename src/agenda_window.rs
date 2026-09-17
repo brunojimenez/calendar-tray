@@ -20,10 +20,12 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
 
-const ROW_HEIGHT: i32 = 30;
-const WINDOW_WIDTH: i32 = 420;
-const ROWS_TOP: i32 = 40;
-const DOT_SIZE: i32 = 12;
+const ROW_HEIGHT: i32 = 28;
+const WINDOW_WIDTH: i32 = 400;
+// Deja lugar solo para el boton "cerrar" (X) de arriba a la derecha -- sin titulo, sin
+// margen extra (el hueco que parecia "para un titulo" que no iba a existir).
+const ROWS_TOP: i32 = 26;
+const DOT_SIZE: i32 = 10;
 
 #[derive(Clone, Copy)]
 enum RowStatus {
@@ -98,7 +100,7 @@ impl AgendaWindow {
 
         if events.is_empty() {
             self.empty_label.set_visible(true);
-            self.window.set_size(WINDOW_WIDTH as u32, (ROWS_TOP + 80) as u32);
+            self.window.set_size(WINDOW_WIDTH as u32, (ROWS_TOP + 60) as u32);
             return;
         }
         self.empty_label.set_visible(false);
@@ -121,8 +123,8 @@ impl AgendaWindow {
             let mut label = nwg::Label::default();
             nwg::Label::builder()
                 .text(&row_text(event))
-                .position((32, y + 4))
-                .size((256, 20))
+                .position((28, y + 4))
+                .size((244, 20))
                 .parent(&self.window)
                 .build(&mut label)
                 .expect("no se pudo crear la fila de agenda");
@@ -132,8 +134,8 @@ impl AgendaWindow {
             let mut copy_button = nwg::Button::default();
             nwg::Button::builder()
                 .text(if has_link { "📋" } else { "" })
-                .position((296, y))
-                .size((56, 26))
+                .position((278, y))
+                .size((52, 24))
                 .parent(&self.window)
                 .build(&mut copy_button)
                 .expect("no se pudo crear el boton copiar");
@@ -142,8 +144,8 @@ impl AgendaWindow {
             let mut join_button = nwg::Button::default();
             nwg::Button::builder()
                 .text(if has_link { "🔗" } else { "" })
-                .position((356, y))
-                .size((56, 26))
+                .position((334, y))
+                .size((52, 24))
                 .parent(&self.window)
                 .build(&mut join_button)
                 .expect("no se pudo crear el boton ir");
@@ -159,16 +161,9 @@ impl AgendaWindow {
         }
         drop(rows);
 
-        let content_height = ROWS_TOP + (events.len() as i32) * ROW_HEIGHT + 50;
+        let content_height = ROWS_TOP + (events.len() as i32) * ROW_HEIGHT + 10;
         self.window
-            .set_size(WINDOW_WIDTH as u32, content_height.clamp(160, 700) as u32);
-        self.reposition_close_button();
-    }
-
-    fn reposition_close_button(&self) {
-        let rows_count = self.rows.borrow().len() as i32;
-        let y = ROWS_TOP + rows_count * ROW_HEIGHT + 12;
-        self.close_button.set_position(12, y);
+            .set_size(WINDOW_WIDTH as u32, content_height.clamp(120, 700) as u32);
     }
 
     /// Posiciona el flyout junto al punto del click en el ícono (normalmente la bandeja
@@ -249,15 +244,17 @@ impl NativeUi<AgendaWindowUi> for AgendaWindow {
 
         nwg::Label::builder()
             .text("No hay actividades hoy.")
-            .position((12, 12))
-            .size((380, 40))
+            .position((12, ROWS_TOP))
+            .size((340, 40))
             .parent(&data.window)
             .build(&mut data.empty_label)?;
 
+        // X chica arriba a la derecha en vez de un boton "Cerrar" abajo -- con el flyout
+        // pegado al borde de la pantalla, un boton abajo podia quedar fuera de la vista.
         nwg::Button::builder()
-            .text("Cerrar")
-            .position((12, 140))
-            .size((100, 30))
+            .text("✕")
+            .position((WINDOW_WIDTH - 24, 2))
+            .size((22, 22))
             .parent(&data.window)
             .build(&mut data.close_button)?;
 

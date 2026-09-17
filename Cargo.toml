@@ -12,3 +12,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
 tray-icon = "0.25.1"
 ureq = "3.4.2"
+
+[build-dependencies]
+embed-manifest = "1.5.1"

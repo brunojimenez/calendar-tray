@@ -77,7 +77,17 @@ fn main() {
     });
 
     nwg::init().expect("no se pudo inicializar native-windows-gui");
-    let _ = nwg::Font::set_global_family("Segoe UI");
+    // Tamaño chico a propósito -- el default de nwg sin esto se ve grande, casi el doble
+    // que la letra de la barra de tareas.
+    let mut default_font = nwg::Font::default();
+    if nwg::Font::builder()
+        .family("Segoe UI")
+        .size(15)
+        .build(&mut default_font)
+        .is_ok()
+    {
+        nwg::Font::set_global_default(Some(default_font));
+    }
 
     let menu = Menu::new();
     let settings_item = MenuItem::new("Configuración", true, None);
