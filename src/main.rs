@@ -6,6 +6,7 @@ mod agenda_window;
 mod app_state;
 mod calendar;
 mod config;
+mod diagnostics;
 mod meeting_clock;
 mod settings_window;
 mod tray;
@@ -122,6 +123,7 @@ fn main() {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
+                position,
                 ..
             } = event
             {
@@ -141,7 +143,9 @@ fn main() {
                 }
                 if let Some(ui) = &agenda_ui {
                     ui.rebuild(&state.cached_events, now, &thresholds);
+                    ui.position_near(position.x as i32, position.y as i32);
                     ui.window.set_visible(true);
+                    ui.window.set_focus();
                 }
             }
         }

@@ -171,6 +171,16 @@ impl AgendaWindow {
         self.close_button.set_position(12, y);
     }
 
+    /// Posiciona el flyout junto al punto del click en el ícono (normalmente la bandeja
+    /// está abajo a la derecha, así que se ancla arriba-izquierda del punto). Llamar
+    /// **después** de `rebuild`, que es quien fija el tamaño final de la ventana.
+    pub fn position_near(&self, anchor_x: i32, anchor_y: i32) {
+        let (w, h) = self.window.size();
+        let x = (anchor_x - w as i32 + 20).max(4);
+        let y = (anchor_y - h as i32 - 8).max(4);
+        self.window.set_position(x, y);
+    }
+
     fn copy_link(&self, url: &str) {
         nwg::Clipboard::set_data_text(&self.window, url);
     }
@@ -200,6 +210,9 @@ fn row_text(event: &CalendarEvent) -> String {
 pub struct AgendaWindowUi {
     inner: Rc<AgendaWindow>,
     default_handler: RefCell<Option<nwg::EventHandler>>,
+    /// Handler de bajo nivel para WM_ACTIVATE — así el flyout se cierra solo al perder
+    /// el foco (click afuera), como pidió el usuario en vez de una ventana normal.
+    deactivate_handler: RefCell<Option<nwg::RawEventHandler>>,
 }
 
 impl Deref for AgendaWindowUi {
@@ -214,16 +227,24 @@ impl Drop for AgendaWindowUi {
         if let Some(handler) = self.default_handler.borrow().as_ref() {
             nwg::unbind_event_handler(handler);
         }
+        if let Some(handler) = self.deactivate_handler.borrow().as_ref() {
+            let _ = nwg::unbind_raw_event_handler(handler);
+        }
     }
 }
 
+const WM_ACTIVATE: u32 = 0x0006;
+const WA_INACTIVE: usize = 0;
+const DEACTIVATE_HANDLER_ID: usize = 0x1_0001; // > 0xFFFF, reservado por NWG debajo de eso
+
 impl NativeUi<AgendaWindowUi> for AgendaWindow {
     fn build_ui(mut data: AgendaWindow) -> Result<AgendaWindowUi, nwg::NwgError> {
+        // POPUP: sin barra de título ni bordes de ventana — un "cuadro" flotante junto al
+        // ícono en vez de una ventana normal (pedido explícito del usuario).
         nwg::Window::builder()
-            .flags(nwg::WindowFlags::WINDOW)
+            .flags(nwg::WindowFlags::POPUP)
             .size((WINDOW_WIDTH, 200))
             .position((320, 260))
-            .title("Agenda del dia - Calendar Tray")
             .build(&mut data.window)?;
 
         nwg::Label::builder()
@@ -243,6 +264,7 @@ impl NativeUi<AgendaWindowUi> for AgendaWindow {
         let ui = AgendaWindowUi {
             inner: Rc::new(data),
             default_handler: Default::default(),
+            deactivate_handler: Default::default(),
         };
 
         let evt_ui = Rc::downgrade(&ui.inner);
@@ -284,6 +306,22 @@ impl NativeUi<AgendaWindowUi> for AgendaWindow {
 
         *ui.default_handler.borrow_mut() =
             Some(nwg::full_bind_event_handler(&ui.window.handle, handle_events));
+
+        let deactivate_ui = Rc::downgrade(&ui.inner);
+        let deactivate_handler = nwg::bind_raw_event_handler(
+            &ui.window.handle,
+            DEACTIVATE_HANDLER_ID,
+            move |_hwnd, msg, wparam, _lparam| {
+                if msg == WM_ACTIVATE && (wparam & 0xFFFF) == WA_INACTIVE {
+                    if let Some(ui) = deactivate_ui.upgrade() {
+                        ui.window.set_visible(false);
+                    }
+                }
+                None
+            },
+        )
+        .ok();
+        *ui.deactivate_handler.borrow_mut() = deactivate_handler;
 
         Ok(ui)
     }

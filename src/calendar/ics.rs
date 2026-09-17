@@ -123,6 +123,13 @@ fn parse_and_filter_events(
         }
     }
 
+    crate::diagnostics::log(format!(
+        "parse: {} single, {} recurring-masters, {} overrides -- rango [{from} .. {to})",
+        single_events.len(),
+        recurring_masters.len(),
+        overrides.len()
+    ));
+
     let mut events = Vec::new();
 
     for event in single_events {
@@ -136,6 +143,17 @@ fn parse_and_filter_events(
     }
 
     events.sort_by_key(|e| e.start);
+
+    crate::diagnostics::log(format!(
+        "resultado: {} eventos -- {}",
+        events.len(),
+        events
+            .iter()
+            .map(|e| format!("[{} @ {}]", e.summary, e.start.format("%m-%d %H:%M")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+
     Ok(events)
 }
 
@@ -151,8 +169,13 @@ fn expand_recurring_event(
     to: DateTime<Utc>,
     events: &mut Vec<CalendarEvent>,
 ) {
+    let uid = master.get_uid().unwrap_or_default().to_string();
+    let summary = master.get_summary().unwrap_or("(sin titulo)").to_string();
+    let rrule_raw = master.property_value("RRULE").unwrap_or("(sin RRULE?)");
+
     // Serie cancelada entera (raro, pero posible) -> se oculta completa (SPEC.md §2.4).
     if master.get_status() == Some(EventStatus::Cancelled) {
+        crate::diagnostics::log(format!("recurrente '{summary}' ({uid}): omitida, serie cancelada"));
         return;
     }
 
@@ -160,10 +183,16 @@ fn expand_recurring_event(
     // punto 1: no mezclar aritmetica de DATE con DATE-TIME) — se omiten en vez de calcular
     // mal su horario.
     if matches!(master.get_start(), Some(DatePerhapsTime::Date(_))) {
+        crate::diagnostics::log(format!(
+            "recurrente '{summary}' ({uid}): omitida, es de dia completo (no soportado aun)"
+        ));
         return;
     }
 
     let Some((master_start, _)) = master.get_start().and_then(|d| to_utc_and_all_day(&d)) else {
+        crate::diagnostics::log(format!(
+            "recurrente '{summary}' ({uid}): omitida, no se pudo leer DTSTART"
+        ));
         return;
     };
     let master_end = master
@@ -173,11 +202,18 @@ fn expand_recurring_event(
         .unwrap_or(master_start);
     let duration = master_end - master_start;
 
-    let Ok(rrule_set) = master.get_recurrence() else {
-        return; // RRULE invalida contra la libreria real -> se omite esa serie, no se adivina.
+    let rrule_set = match master.get_recurrence() {
+        Ok(set) => set,
+        Err(err) => {
+            // RRULE invalida contra la libreria real -> se omite esa serie, no se adivina.
+            crate::diagnostics::log(format!(
+                "recurrente '{summary}' ({uid}): RRULE='{rrule_raw}' DTSTART={master_start} \
+                 -- get_recurrence() fallo: {err:?}"
+            ));
+            return;
+        }
     };
 
-    let uid = master.get_uid().unwrap_or_default().to_string();
     let from_tz = from.with_timezone(&icalendar::Tz::UTC);
     let to_tz = to.with_timezone(&icalendar::Tz::UTC);
     let occurrences = rrule_set
@@ -185,6 +221,12 @@ fn expand_recurring_event(
         .before(to_tz)
         .all(MAX_OCCURRENCES_PER_SERIES)
         .dates;
+
+    crate::diagnostics::log(format!(
+        "recurrente '{summary}' ({uid}): RRULE='{rrule_raw}' DTSTART={master_start} -- \
+         {} ocurrencia(s) en rango",
+        occurrences.len()
+    ));
 
     for occurrence in occurrences {
         let occ_start = occurrence.with_timezone(&Utc);
