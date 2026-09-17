@@ -5,6 +5,8 @@
 //! funcionalidad de fondo no está implementada aún — se agregan a este formulario cuando
 //! esos pasos del plan lleguen, para no mostrar controles que no hacen nada.
 
+use crate::calendar::ics::IcsCalendarSource;
+use crate::calendar::CalendarSource;
 use crate::config::AppConfig;
 use native_windows_derive as nwd;
 use native_windows_gui as nwg;
@@ -19,8 +21,11 @@ pub struct SettingsWindow {
 
     #[nwg_control(text: "URL del feed ICS (secreta):", position: (12, 12), size: (350, 20))]
     url_label: nwg::Label,
-    #[nwg_control(text: "", position: (12, 34), size: (350, 24))]
+    #[nwg_control(text: "", position: (12, 34), size: (278, 24))]
     pub url_input: nwg::TextInput,
+    #[nwg_control(text: "Probar", position: (296, 33), size: (66, 24))]
+    #[nwg_events( OnButtonClick: [SettingsWindow::on_test] )]
+    test_button: nwg::Button,
 
     #[nwg_control(text: "Umbral verde (min):", position: (12, 70), size: (220, 20))]
     green_label: nwg::Label,
@@ -115,5 +120,45 @@ impl SettingsWindow {
 
     fn on_close(&self) {
         self.window.set_visible(false);
+    }
+
+    /// Prueba la URL tal como está escrita ahora mismo (sin guardar) haciendo un fetch real
+    /// contra el feed, igual que el botón "Probar" de la versión Java anterior.
+    fn on_test(&self) {
+        let url = self.url_input.text().trim().to_string();
+        if url.is_empty() {
+            nwg::modal_error_message(&self.window, "Probar conexión", "Ingresá una URL primero.");
+            return;
+        }
+
+        self.test_button.set_text("Probando...");
+        self.test_button.set_enabled(false);
+
+        let source = IcsCalendarSource::new(url);
+        let now = chrono::Utc::now();
+        let result = source.fetch_events(now, now + chrono::Duration::hours(24));
+
+        self.test_button.set_enabled(true);
+        self.test_button.set_text("Probar");
+
+        match result {
+            Ok(events) => {
+                nwg::modal_info_message(
+                    &self.window,
+                    "Conexión OK",
+                    &format!(
+                        "Se pudo leer el feed correctamente.\n{} reunion(es) en las próximas 24h.",
+                        events.len()
+                    ),
+                );
+            }
+            Err(err) => {
+                nwg::modal_error_message(
+                    &self.window,
+                    "No se pudo conectar",
+                    &format!("{err}"),
+                );
+            }
+        }
     }
 }

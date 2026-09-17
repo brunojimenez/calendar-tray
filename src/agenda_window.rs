@@ -1,9 +1,19 @@
 //! Ventana de Agenda del día (SPEC.md §2.7). Filas dinámicas (una por evento), así que
 //! está escrita a mano en vez de con la macro `#[derive(NwgUi)]` — la cantidad de filas no
 //! se sabe en tiempo de compilación.
+//!
+//! Muestra **todas** las actividades del día (no solo la ventana de 24h del semáforo del
+//! ícono), con un indicador de color por fila según el estado temporal de cada una — igual
+//! al comportamiento de la versión Java anterior:
+//! - Gris: ya pasó.
+//! - Rojo: está ocurriendo ahora mismo.
+//! - Amarillo: está por empezar (dentro del umbral "cercano").
+//! - Verde: todavía falta.
+//! - Azul: evento de día completo (no encaja en la escala temporal de arriba).
 
 use crate::calendar::CalendarEvent;
-use chrono::{DateTime, Local};
+use crate::meeting_clock::Thresholds;
+use chrono::{DateTime, Local, Utc};
 use native_windows_gui as nwg;
 use nwg::{Event as E, NativeUi};
 use std::cell::RefCell;
@@ -11,10 +21,59 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 const ROW_HEIGHT: i32 = 30;
-const WINDOW_WIDTH: i32 = 460;
+const WINDOW_WIDTH: i32 = 420;
 const ROWS_TOP: i32 = 40;
+const DOT_SIZE: i32 = 12;
+
+#[derive(Clone, Copy)]
+enum RowStatus {
+    Past,
+    Ongoing,
+    Near,
+    Future,
+    AllDay,
+}
+
+impl RowStatus {
+    fn color(self) -> [u8; 3] {
+        match self {
+            RowStatus::Past => [140, 140, 140],
+            RowStatus::Ongoing => [201, 42, 42],
+            RowStatus::Near => [212, 168, 24],
+            RowStatus::Future => [46, 160, 67],
+            RowStatus::AllDay => [90, 110, 200],
+        }
+    }
+}
+
+fn classify_row(event: &CalendarEvent, now: DateTime<Utc>, near_minutes: i64) -> RowStatus {
+    if event.all_day {
+        return RowStatus::AllDay;
+    }
+    if event.end <= now {
+        RowStatus::Past
+    } else if event.start <= now {
+        RowStatus::Ongoing
+    } else if (event.start - now).num_minutes() <= near_minutes {
+        RowStatus::Near
+    } else {
+        RowStatus::Future
+    }
+}
+
+/// Eventos cuyo inicio cae en el día calendario local de `now` (no la ventana rolling de
+/// 24h que usa el semáforo del ícono — acá se quiere ver el día completo, pasado incluido).
+fn events_for_today(events: &[CalendarEvent], now: DateTime<Utc>) -> Vec<CalendarEvent> {
+    let today = now.with_timezone(&Local).date_naive();
+    events
+        .iter()
+        .filter(|e| e.start.with_timezone(&Local).date_naive() == today)
+        .cloned()
+        .collect()
+}
 
 struct AgendaRow {
+    dot: nwg::Label,
     label: nwg::Label,
     copy_button: nwg::Button,
     join_button: nwg::Button,
@@ -30,10 +89,12 @@ pub struct AgendaWindow {
 }
 
 impl AgendaWindow {
-    /// Reconstruye la lista con los eventos dados. Se llama cada vez que se abre la ventana
-    /// (SPEC.md §2.7), así siempre refleja la última data conocida.
-    pub fn rebuild(&self, events: &[CalendarEvent]) {
+    /// Reconstruye la lista con las actividades del día (SPEC.md §2.7). Se llama cada vez
+    /// que se abre la ventana, así siempre refleja la última data conocida.
+    pub fn rebuild(&self, all_cached_events: &[CalendarEvent], now: DateTime<Utc>, thresholds: &Thresholds) {
         self.rows.borrow_mut().clear(); // dropea los controles viejos (destruye el HWND)
+
+        let events = events_for_today(all_cached_events, now);
 
         if events.is_empty() {
             self.empty_label.set_visible(true);
@@ -45,22 +106,34 @@ impl AgendaWindow {
         let mut rows = self.rows.borrow_mut();
         for (i, event) in events.iter().enumerate() {
             let y = ROWS_TOP + (i as i32) * ROW_HEIGHT;
+            let status = classify_row(event, now, thresholds.yellow_minutes as i64);
+
+            let mut dot = nwg::Label::default();
+            nwg::Label::builder()
+                .text("")
+                .position((12, y + 8))
+                .size((DOT_SIZE, DOT_SIZE))
+                .background_color(Some(status.color()))
+                .parent(&self.window)
+                .build(&mut dot)
+                .expect("no se pudo crear el indicador de color");
 
             let mut label = nwg::Label::default();
             nwg::Label::builder()
                 .text(&row_text(event))
-                .position((12, y + 4))
-                .size((280, 20))
+                .position((32, y + 4))
+                .size((256, 20))
                 .parent(&self.window)
                 .build(&mut label)
                 .expect("no se pudo crear la fila de agenda");
 
-            let mut copy_button = nwg::Button::default();
             let has_link = event.meeting_url.is_some();
+
+            let mut copy_button = nwg::Button::default();
             nwg::Button::builder()
-                .text(if has_link { "Copiar" } else { "" })
+                .text(if has_link { "📋" } else { "" })
                 .position((296, y))
-                .size((70, 26))
+                .size((56, 26))
                 .parent(&self.window)
                 .build(&mut copy_button)
                 .expect("no se pudo crear el boton copiar");
@@ -68,15 +141,16 @@ impl AgendaWindow {
 
             let mut join_button = nwg::Button::default();
             nwg::Button::builder()
-                .text(if has_link { "Ir" } else { "" })
-                .position((372, y))
-                .size((70, 26))
+                .text(if has_link { "🔗" } else { "" })
+                .position((356, y))
+                .size((56, 26))
                 .parent(&self.window)
                 .build(&mut join_button)
                 .expect("no se pudo crear el boton ir");
             join_button.set_visible(has_link);
 
             rows.push(AgendaRow {
+                dot,
                 label,
                 copy_button,
                 join_button,
@@ -153,9 +227,9 @@ impl NativeUi<AgendaWindowUi> for AgendaWindow {
             .build(&mut data.window)?;
 
         nwg::Label::builder()
-            .text("No hay reuniones en la ventana de las proximas 24h.")
+            .text("No hay actividades hoy.")
             .position((12, 12))
-            .size((420, 40))
+            .size((380, 40))
             .parent(&data.window)
             .build(&mut data.empty_label)?;
 
@@ -212,5 +286,57 @@ impl NativeUi<AgendaWindowUi> for AgendaWindow {
             Some(nwg::full_bind_event_handler(&ui.window.handle, handle_events));
 
         Ok(ui)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::calendar::RsvpStatus;
+    use chrono::{Duration, TimeZone};
+
+    fn now() -> DateTime<Utc> {
+        // Mediodia local para no rozar el borde de dia calendario en el test.
+        Utc.with_ymd_and_hms(2026, 1, 1, 15, 0, 0).unwrap()
+    }
+
+    fn event(uid: &str, start_offset_min: i64, dur_min: i64, all_day: bool) -> CalendarEvent {
+        let start = now() + Duration::minutes(start_offset_min);
+        CalendarEvent {
+            uid: uid.into(),
+            summary: uid.into(),
+            start,
+            end: start + Duration::minutes(dur_min),
+            all_day,
+            rsvp: RsvpStatus::Accepted,
+            meeting_url: None,
+        }
+    }
+
+    #[test]
+    fn clasifica_pasada_actual_cercana_y_futura() {
+        let t = now();
+        assert!(matches!(classify_row(&event("a", -120, 30, false), t, 15), RowStatus::Past));
+        assert!(matches!(classify_row(&event("b", -10, 30, false), t, 15), RowStatus::Ongoing));
+        assert!(matches!(classify_row(&event("c", 10, 30, false), t, 15), RowStatus::Near));
+        assert!(matches!(classify_row(&event("d", 120, 30, false), t, 15), RowStatus::Future));
+        assert!(matches!(classify_row(&event("e", 0, 30, true), t, 15), RowStatus::AllDay));
+    }
+
+    #[test]
+    fn events_for_today_incluye_pasadas_del_mismo_dia_y_excluye_otros_dias() {
+        let t = now();
+        let events = vec![
+            event("pasada-hoy", -300, 30, false),
+            event("futura-hoy", 300, 30, false),
+            event("manana", 60 * 24, 30, false), // mas de 24h -> otro dia
+        ];
+
+        let today = events_for_today(&events, t);
+        let uids: Vec<&str> = today.iter().map(|e| e.uid.as_str()).collect();
+
+        assert!(uids.contains(&"pasada-hoy"));
+        assert!(uids.contains(&"futura-hoy"));
+        assert!(!uids.contains(&"manana"));
     }
 }

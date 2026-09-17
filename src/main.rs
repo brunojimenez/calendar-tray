@@ -11,6 +11,7 @@ mod settings_window;
 mod tray;
 
 use agenda_window::AgendaWindow;
+use chrono::TimeZone;
 use app_state::{AppState, DisplayState};
 use calendar::ics::IcsCalendarSource;
 use calendar::{CalendarError, CalendarEvent, CalendarSource};
@@ -50,8 +51,23 @@ fn main() {
         while let Ok(url) = fetch_request_rx.recv() {
             let source = IcsCalendarSource::new(url);
             let now = chrono::Utc::now();
+            // Rango lo bastante ancho para cubrir tanto la ventana rolling de 24h que usa
+            // el semaforo del icono como el dia calendario local completo (pasado incluido)
+            // que muestra la Agenda (SPEC.md §2.1 vs §2.7 — son consultas distintas pero se
+            // sirven con un solo fetch para no duplicar llamadas al feed).
+            let local_today = now.with_timezone(&chrono::Local).date_naive();
+            let local_midnight = local_today.and_hms_opt(0, 0, 0).expect("medianoche valida");
+            let day_start = chrono::Local
+                .from_local_datetime(&local_midnight)
+                .earliest()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or(now);
+            let day_end = day_start + chrono::Duration::days(1);
+            let from = day_start.min(now);
+            let to = day_end.max(now + chrono::Duration::hours(24));
+
             let result = source
-                .fetch_events(now, now + chrono::Duration::hours(24))
+                .fetch_events(from, to)
                 .map_err(|e: CalendarError| e.to_string());
             if fetch_result_tx.send(result).is_err() {
                 break;
@@ -60,6 +76,7 @@ fn main() {
     });
 
     nwg::init().expect("no se pudo inicializar native-windows-gui");
+    let _ = nwg::Font::set_global_family("Segoe UI");
 
     let menu = Menu::new();
     let settings_item = MenuItem::new("Configuración", true, None);
@@ -123,7 +140,7 @@ fn main() {
                         .ok();
                 }
                 if let Some(ui) = &agenda_ui {
-                    ui.rebuild(&state.cached_events);
+                    ui.rebuild(&state.cached_events, now, &thresholds);
                     ui.window.set_visible(true);
                 }
             }
