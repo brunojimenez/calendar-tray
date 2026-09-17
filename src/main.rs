@@ -2,6 +2,7 @@
 // Ver SPEC.md §9 para el mapa de responsabilidades de cada módulo.
 #![windows_subsystem = "windows"]
 
+mod agenda_window;
 mod app_state;
 mod calendar;
 mod config;
@@ -9,6 +10,7 @@ mod meeting_clock;
 mod settings_window;
 mod tray;
 
+use agenda_window::AgendaWindow;
 use app_state::{AppState, DisplayState};
 use calendar::ics::IcsCalendarSource;
 use calendar::{CalendarError, CalendarEvent, CalendarSource};
@@ -79,9 +81,14 @@ fn main() {
         .build()
         .expect("no se pudo crear el icono de bandeja");
 
+    // Solo el click derecho abre el menú nativo — el izquierdo queda para silenciar +
+    // abrir la Agenda (SPEC.md §2.2).
+    tray_icon.set_show_menu_on_left_click(false);
+
     let mut state = AppState::default();
     let mut unconfigured = config.is_unconfigured();
     let mut settings_ui: Option<_> = None;
+    let mut agenda_ui: Option<_> = None;
 
     let mut last_tick = Instant::now();
     let mut last_fetch_request = Instant::now() - refresh_interval; // fuerza el primer fetch ya
@@ -101,14 +108,23 @@ fn main() {
                 ..
             } = event
             {
-                // Click izquierdo silencia el parpadeo de la reunión que esté alertando
-                // ahora mismo (SPEC.md §2.1, §2.2). La ventana de Agenda (§2.7) llega en un
-                // paso posterior; por ahora el click solo silencia.
+                // Click izquierdo: silencia el parpadeo de la reunión que esté alertando y
+                // abre la Agenda del día (SPEC.md §2.1, §2.2, §2.7).
                 let now = chrono::Utc::now();
                 if let DisplayState::Meeting { uid, start, .. } =
                     state.compute_display(now, &thresholds)
                 {
                     state.silence(uid, start);
+                }
+
+                if agenda_ui.is_none() {
+                    agenda_ui = AgendaWindow::build_ui(Default::default())
+                        .map_err(|e| eprintln!("no se pudo crear la ventana de Agenda: {e}"))
+                        .ok();
+                }
+                if let Some(ui) = &agenda_ui {
+                    ui.rebuild(&state.cached_events);
+                    ui.window.set_visible(true);
                 }
             }
         }

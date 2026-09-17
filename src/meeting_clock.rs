@@ -95,6 +95,7 @@ mod tests {
             end: start + Duration::minutes(30),
             all_day,
             rsvp: RsvpStatus::Accepted,
+            meeting_url: None,
         }
     }
 

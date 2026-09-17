@@ -3,7 +3,9 @@
 
 use super::{CalendarError, CalendarEvent, CalendarSource, RsvpStatus};
 use chrono::{DateTime, Utc};
-use icalendar::{Calendar, CalendarComponent, Component, DatePerhapsTime, EventStatus, PartStat};
+use icalendar::{
+    Calendar, CalendarComponent, Component, DatePerhapsTime, EventLike, EventStatus, PartStat,
+};
 use std::time::Duration;
 
 pub struct IcsCalendarSource {
@@ -126,6 +128,16 @@ fn parse_and_filter_events(
             continue;
         }
 
+        let mut link_text = String::new();
+        if let Some(desc) = event.get_description() {
+            link_text.push_str(desc);
+            link_text.push(' ');
+        }
+        if let Some(loc) = event.get_location() {
+            link_text.push_str(loc);
+        }
+        let meeting_url = extract_meeting_url(&link_text);
+
         events.push(CalendarEvent {
             uid: event.get_uid().unwrap_or_default().to_string(),
             summary: event.get_summary().unwrap_or("(sin titulo)").to_string(),
@@ -133,11 +145,30 @@ fn parse_and_filter_events(
             end: end_utc,
             all_day: start_all_day,
             rsvp,
+            meeting_url,
         });
     }
 
     events.sort_by_key(|e| e.start);
     Ok(events)
+}
+
+/// Reconoce links de Meet, Zoom y Teams en texto libre (SPEC.md §2.7: no limitarse a
+/// `meet.google.com`, entorno corporativo mixto).
+const MEETING_LINK_MARKERS: [&str; 3] = ["meet.google.com/", "zoom.us/", "teams.microsoft.com/"];
+
+fn extract_meeting_url(text: &str) -> Option<String> {
+    text.split(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '"' || c == '\'')
+        .map(|word| {
+            word.trim_matches(|c: char| {
+                !(c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '.' | '-' | '_' | '?' | '=' | '&'))
+            })
+        })
+        .find(|word| {
+            (word.starts_with("http://") || word.starts_with("https://"))
+                && MEETING_LINK_MARKERS.iter().any(|marker| word.contains(marker))
+        })
+        .map(|word| word.to_string())
 }
 
 fn resolve_rsvp(event: &icalendar::Event, user_email: Option<&str>) -> RsvpStatus {
@@ -279,6 +310,38 @@ END:VCALENDAR\r\n";
             .expect("allday-1 deberia estar presente");
 
         assert!(all_day.all_day);
+    }
+
+    #[test]
+    fn extrae_link_de_meet() {
+        let text = "Unite a la videollamada: https://meet.google.com/abc-defg-hij por Meet";
+        assert_eq!(
+            extract_meeting_url(text).as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+    }
+
+    #[test]
+    fn extrae_link_de_zoom() {
+        let text = "Join Zoom Meeting\nhttps://wom.zoom.us/j/123456789?pwd=abc\nMeeting ID: 123";
+        assert_eq!(
+            extract_meeting_url(text).as_deref(),
+            Some("https://wom.zoom.us/j/123456789?pwd=abc")
+        );
+    }
+
+    #[test]
+    fn extrae_link_de_teams() {
+        let text = "<a href=\"https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc\">Unirse</a>";
+        assert_eq!(
+            extract_meeting_url(text).as_deref(),
+            Some("https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc")
+        );
+    }
+
+    #[test]
+    fn sin_link_de_reunion_devuelve_none() {
+        assert_eq!(extract_meeting_url("Reunion presencial en sala 3"), None);
     }
 
     #[test]

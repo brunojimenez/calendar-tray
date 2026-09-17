@@ -21,6 +21,8 @@ pub struct CalendarEvent {
     pub end: DateTime<Utc>,
     pub all_day: bool,
     pub rsvp: RsvpStatus,
+    /// Link de Meet/Zoom/Teams detectado en la descripción o ubicación (SPEC.md §2.7).
+    pub meeting_url: Option<String>,
 }
 
 #[derive(Debug)]
