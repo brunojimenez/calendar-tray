@@ -1,8 +1,8 @@
 # Calendar Tray
 
 App de bandeja del sistema para Windows que muestra, de un vistazo, cuánto falta para tu
-próxima reunión de Google Calendar — sin usar la API oficial, sin OAuth, y consumiendo unos
-pocos MB de RAM en vez de los ~200 MB de una JVM.
+próxima reunión de Google Calendar — sin usar la API oficial, sin OAuth, y con un consumo de
+memoria mínimo (nativa, sin runtime pesado de por medio).
 
 El ícono es un reloj de arena que se va llenando de abajo hacia arriba a medida que se acerca
 la hora, con colores tipo semáforo (verde / amarillo / rojo) y parpadeo en el último minuto.
