@@ -14,7 +14,9 @@ const ACCENT_WIDTH: i32 = 5;
 
 #[derive(Default, NwgUi)]
 pub struct ToastWindow {
-    #[nwg_control(size: (WINDOW_WIDTH, WINDOW_HEIGHT), position: (0, 0), flags: "POPUP")]
+    // ex_flags 0x80 = WS_EX_TOOLWINDOW (nunca aparece en la barra de tareas ni Alt+Tab);
+    // topmost para que no quede tapado detrás de otras ventanas ya abiertas.
+    #[nwg_control(size: (WINDOW_WIDTH, WINDOW_HEIGHT), position: (0, 0), flags: "POPUP", ex_flags: 0x80, topmost: true)]
     pub window: nwg::Window,
 
     #[nwg_control(text: "", position: (18, 16), size: (WINDOW_WIDTH - 30, 34))]

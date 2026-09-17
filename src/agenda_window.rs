@@ -256,14 +256,21 @@ impl Drop for AgendaWindowUi {
 
 const WM_ACTIVATE: u32 = 0x0006;
 const WA_INACTIVE: usize = 0;
+/// Win32 WS_EX_TOOLWINDOW -- la ventana nunca aparece en la barra de tareas ni en Alt+Tab.
+const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
 const DEACTIVATE_HANDLER_ID: usize = 0x1_0001; // > 0xFFFF, reservado por NWG debajo de eso
 
 impl NativeUi<AgendaWindowUi> for AgendaWindow {
     fn build_ui(mut data: AgendaWindow) -> Result<AgendaWindowUi, nwg::NwgError> {
         // POPUP: sin barra de título ni bordes de ventana — un "cuadro" flotante junto al
         // ícono en vez de una ventana normal (pedido explícito del usuario).
+        // ex_flags = WS_EX_TOOLWINDOW: nunca debe aparecer como botón en la barra de tareas
+        // (a veces lo hacía, con el ícono genérico de Windows — bug reportado). topmost:
+        // sin esto a veces quedaba tapado detrás de otras ventanas ya abiertas.
         nwg::Window::builder()
             .flags(nwg::WindowFlags::POPUP)
+            .ex_flags(WS_EX_TOOLWINDOW)
+            .topmost(true)
             .size((WINDOW_WIDTH, 200))
             .position((320, 260))
             .build(&mut data.window)?;
