@@ -14,6 +14,10 @@ pub enum DisplayState {
     Unconfigured,
     Error { message: String },
     Neutral,
+    /// Una o más reuniones pasando ahora mismo — tiene prioridad sobre `Meeting` (buscar
+    /// "la próxima" mientras hay una en curso mostraría verde/neutro, inconsistente con la
+    /// fila roja "en curso" de la Agenda).
+    Ongoing { summaries: Vec<String> },
     Meeting {
         uid: String,
         start: DateTime<Utc>,
@@ -49,6 +53,13 @@ impl AppState {
     }
 
     pub fn compute_display(&self, now: DateTime<Utc>, thresholds: &Thresholds) -> DisplayState {
+        let ongoing = meeting_clock::find_ongoing_meetings(&self.cached_events, now);
+        if !ongoing.is_empty() {
+            return DisplayState::Ongoing {
+                summaries: ongoing.into_iter().map(|e| e.summary).collect(),
+            };
+        }
+
         if let Some(next) = meeting_clock::find_next_meeting(&self.cached_events, now, thresholds) {
             let key = (next.event.uid.clone(), next.event.start);
             let blinking = next.blinking && self.silenced.as_ref() != Some(&key);
@@ -175,6 +186,25 @@ mod tests {
         match state.compute_display(now, &thresholds()) {
             DisplayState::Meeting { blinking, .. } => assert!(!blinking, "deberia estar silenciada"),
             other => panic!("esperaba Meeting sin parpadeo, salio {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reunion_en_curso_tiene_prioridad_sobre_la_proxima() {
+        let mut state = AppState::default();
+        let now = now();
+        let en_curso = meeting_in(-5, now); // empezo hace 5 min, dura 30 -> sigue activa
+        let futura_verde = {
+            let mut e = meeting_in(60, now);
+            e.uid = "futura".into();
+            e.summary = "Futura".into();
+            e
+        };
+        state.on_fetch_success(vec![en_curso, futura_verde], now);
+
+        match state.compute_display(now, &thresholds()) {
+            DisplayState::Ongoing { summaries } => assert_eq!(summaries, vec!["Reunion".to_string()]),
+            other => panic!("esperaba Ongoing (no la proxima futura), salio {other:?}"),
         }
     }
 

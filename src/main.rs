@@ -313,6 +313,11 @@ fn render(display: &DisplayState, blink_phase: bool) -> (TrayState, f32, String)
             0.0,
             format!("Calendar Tray - {message}"),
         ),
+        DisplayState::Ongoing { summaries } => (
+            TrayState::Red,
+            1.0, // arena toda abajo: ya esta pasando
+            format!("{} en curso", summaries.join(", ")),
+        ),
         DisplayState::Neutral => (
             TrayState::Neutral,
             0.0,

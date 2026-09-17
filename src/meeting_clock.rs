@@ -28,15 +28,12 @@ pub struct Thresholds {
 /// Ventana de búsqueda de "próxima reunión" (SPEC.md §2.1): rolling 24h desde `now`.
 const LOOKAHEAD: Duration = Duration::hours(24);
 
-/// Busca la próxima reunión elegible.
+/// Busca la próxima reunión elegible que **todavía no empezó** (`start > now`).
 ///
 /// `events` ya debe venir filtrado por `CalendarSource` (RSVP/cancelados, SPEC.md §2.4).
-/// Acá se aplican los dos filtros que son responsabilidad de `MeetingClock`:
-/// - Eventos de día completo se excluyen (SPEC.md §2.1).
-/// - Solo se consideran eventos que **todavía no empezaron** (`start > now`). Una vez que
-///   arranca una reunión se deja de mostrar como "próxima" — el v1 no tiene un estado
-///   especial de "reunión en curso" (eso quedó como mejora futura, SPEC.md §10), así que
-///   simplemente se pasa a buscar la siguiente.
+/// Eventos de día completo se excluyen (SPEC.md §2.1). Si hay una reunión **en curso**
+/// ahora mismo, hay que chequear `find_ongoing_meetings` aparte — este función solo mira
+/// hacia adelante, nunca "adentro" de una reunión que ya arrancó.
 pub fn find_next_meeting(
     events: &[CalendarEvent],
     now: DateTime<Utc>,
@@ -80,6 +77,20 @@ pub fn find_next_meetings(
                 blinking,
             }
         })
+        .collect()
+}
+
+/// Reuniones que están pasando **ahora mismo** (`start <= now < end`, no de día completo).
+///
+/// El ícono debe mostrar esto en vez de saltar directo a "la próxima" — mostrar verde
+/// mientras hay una reunión en curso es una inconsistencia confusa (reportada por el
+/// usuario: la Agenda marca la fila en rojo "en curso" pero el ícono mostraba la próxima
+/// reunión futura, a veces en verde).
+pub fn find_ongoing_meetings(events: &[CalendarEvent], now: DateTime<Utc>) -> Vec<CalendarEvent> {
+    events
+        .iter()
+        .filter(|e| !e.all_day && e.start <= now && now < e.end)
+        .cloned()
         .collect()
 }
 
