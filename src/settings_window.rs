@@ -5,13 +5,12 @@
 //! funcionalidad de fondo no está implementada aún — se agregan a este formulario cuando
 //! esos pasos del plan lleguen, para no mostrar controles que no hacen nada.
 
-use crate::calendar::ics::IcsCalendarSource;
-use crate::calendar::CalendarSource;
 use crate::config::AppConfig;
 use native_windows_derive as nwd;
 use native_windows_gui as nwg;
 use nwd::NwgUi;
 use std::cell::RefCell;
+use std::sync::mpsc::Sender;
 
 #[derive(Default, NwgUi)]
 pub struct SettingsWindow {
@@ -62,6 +61,11 @@ pub struct SettingsWindow {
     /// Config nueva lista para aplicar, consumida por el loop principal (SPEC.md §9: main
     /// hace polling de esto en vez de que la ventana llame directo a la lógica del tray).
     pub pending_config: RefCell<Option<AppConfig>>,
+
+    /// Canal hacia el thread de "probar conexión" (SPEC.md §2.8) -- lo setea `main` una vez
+    /// construida la ventana. El fetch real corre en ese thread, nunca acá: bloquear el
+    /// thread de UI con una llamada de red colgaba toda la app si el feed no respondía.
+    pub test_request_tx: RefCell<Option<Sender<String>>>,
 }
 
 impl SettingsWindow {
@@ -122,8 +126,10 @@ impl SettingsWindow {
         self.window.set_visible(false);
     }
 
-    /// Prueba la URL tal como está escrita ahora mismo (sin guardar) haciendo un fetch real
-    /// contra el feed, igual que el botón "Probar" de la versión Java anterior.
+    /// Pide probar la URL tal como está escrita ahora mismo (sin guardar) — el fetch real lo
+    /// hace el thread dedicado (`main::test_request_rx`), esto solo dispara el pedido y
+    /// deja el botón en "Probando..." hasta que `main` traiga el resultado
+    /// (`show_test_result`, ver abajo) y lo restaure.
     fn on_test(&self) {
         let url = self.url_input.text().trim().to_string();
         if url.is_empty() {
@@ -131,34 +137,28 @@ impl SettingsWindow {
             return;
         }
 
-        self.test_button.set_text("Probando...");
-        self.test_button.set_enabled(false);
+        if let Some(tx) = self.test_request_tx.borrow().as_ref() {
+            if tx.send(url).is_ok() {
+                self.test_button.set_text("Probando...");
+                self.test_button.set_enabled(false);
+            }
+        }
+    }
 
-        let source = IcsCalendarSource::new(url);
-        let now = chrono::Utc::now();
-        let result = source.fetch_events(now, now + chrono::Duration::hours(24));
-
+    /// Llamado desde el loop principal cuando llega el resultado del thread de prueba.
+    pub fn show_test_result(&self, result: Result<usize, String>) {
         self.test_button.set_enabled(true);
         self.test_button.set_text("Probar");
 
         match result {
-            Ok(events) => {
-                nwg::modal_info_message(
-                    &self.window,
-                    "Conexión OK",
-                    &format!(
-                        "Se pudo leer el feed correctamente.\n{} reunion(es) en las próximas 24h.",
-                        events.len()
-                    ),
-                );
-            }
-            Err(err) => {
-                nwg::modal_error_message(
-                    &self.window,
-                    "No se pudo conectar",
-                    &format!("{err}"),
-                );
-            }
-        }
+            Ok(count) => nwg::modal_info_message(
+                &self.window,
+                "Conexión OK",
+                &format!(
+                    "Se pudo leer el feed correctamente.\n{count} reunion(es) en las próximas 24h."
+                ),
+            ),
+            Err(msg) => nwg::modal_error_message(&self.window, "No se pudo conectar", &msg),
+        };
     }
 }

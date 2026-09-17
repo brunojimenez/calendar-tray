@@ -92,6 +92,25 @@ fn main() {
         }
     });
 
+    // Thread separado para el botón "Probar" de Configuración (SPEC.md §2.8) -- antes ese
+    // fetch corría en el thread de UI y colgaba toda la app si la red estaba lenta/caída.
+    let (test_request_tx, test_request_rx) = mpsc::channel::<String>();
+    let (test_result_tx, test_result_rx) = mpsc::channel::<Result<usize, String>>();
+
+    std::thread::spawn(move || {
+        while let Ok(url) = test_request_rx.recv() {
+            let source = IcsCalendarSource::new(url);
+            let now = chrono::Utc::now();
+            let result = source
+                .fetch_events(now, now + chrono::Duration::hours(24))
+                .map(|events| events.len())
+                .map_err(|e: CalendarError| e.to_string());
+            if test_result_tx.send(result).is_err() {
+                break;
+            }
+        }
+    });
+
     nwg::init().expect("no se pudo inicializar native-windows-gui");
     // Tamaño chico a propósito -- el default de nwg sin esto se ve grande, casi el doble
     // que la letra de la barra de tareas.
@@ -189,6 +208,9 @@ fn main() {
                     settings_ui = SettingsWindow::build_ui(Default::default())
                         .map_err(|e| eprintln!("no se pudo crear la ventana de Configuracion: {e}"))
                         .ok();
+                    if let Some(ui) = &settings_ui {
+                        *ui.test_request_tx.borrow_mut() = Some(test_request_tx.clone());
+                    }
                 }
                 if let Some(ui) = &settings_ui {
                     ui.load_from(&config);
@@ -215,6 +237,12 @@ fn main() {
                     let _ = fetch_request_tx.send(config.ics_feed_url.clone());
                     last_fetch_request = Instant::now();
                 }
+            }
+        }
+
+        if let Ok(result) = test_result_rx.try_recv() {
+            if let Some(ui) = &settings_ui {
+                ui.show_test_result(result);
             }
         }
 
