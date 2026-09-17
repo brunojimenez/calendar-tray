@@ -1,7 +1,7 @@
 # Calendar Tray — Especificación funcional y técnica
 
-> Proyecto personal (no es código WOM/Genesis). Reescritura desde cero: la versión anterior
-> (Java 21 + Maven + Swing/AWT) se perdió al borrarse accidentalmente la carpeta de fuentes.
+> Proyecto personal. Reescritura desde cero: la versión anterior (Java 21 + Maven +
+> Swing/AWT) se perdió al borrarse accidentalmente la carpeta de fuentes.
 > **Requisito explícito de esta reescritura: tecnología nativa, NO Java/NO JVM.** El motivo es
 > el consumo de memoria — la versión Java rondaba los ~200 MB solo por tener la JVM cargada
 > para un simple ícono de bandeja.
