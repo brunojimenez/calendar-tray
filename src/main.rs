@@ -2,6 +2,7 @@
 // Ver SPEC.md §9 para el mapa de responsabilidades de cada módulo.
 #![windows_subsystem = "windows"]
 
+mod calendar;
 mod config;
 mod tray;
 
