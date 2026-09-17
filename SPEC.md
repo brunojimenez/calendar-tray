@@ -1,18 +1,14 @@
 # Calendar Tray — Especificación funcional y técnica
 
-> Proyecto personal. Reescritura desde cero: la versión anterior (Java 21 + Maven +
-> Swing/AWT) se perdió al borrarse accidentalmente la carpeta de fuentes.
-> **Requisito explícito de esta reescritura: tecnología nativa, NO Java/NO JVM.** El motivo es
-> el consumo de memoria — la versión Java rondaba los ~200 MB solo por tener la JVM cargada
-> para un simple ícono de bandeja.
+> Proyecto personal. Tecnología nativa (Rust), sin runtime administrado de por medio —
+> requisito explícito para mantener el consumo de memoria mínimo.
 
 ## 1. Objetivo
 
 App de escritorio para Windows que vive en la bandeja del sistema (system tray) y muestra,
 de un vistazo, cuánto falta para la próxima reunión de Google Calendar del usuario. Debe ser
-liviana (target: consumo de memoria muy por debajo de los ~200 MB de la versión Java —
-idealmente de un solo dígito o bajos dos dígitos de MB) y arrancar sola con el inicio de sesión
-de Windows.
+liviana (target: consumo de memoria de un solo dígito o bajos dos dígitos de MB) y arrancar
+sola con el inicio de sesión de Windows.
 
 ## 2. Alcance funcional
 
@@ -165,10 +161,8 @@ para que quien implemente los tenga en cuenta desde el diseño:
    construirse con un tipo fecha-hora-con-zona (zoned/local datetime), no con un instante
    absoluto en UTC puro.
 3. **Verificar contra la librería real antes de asumir su API**, sobre todo si tiene tipos
-   genéricos "pesados" para fechas/horas — en la versión Java se verificó la firma real con
-   `javap` contra el jar de `ical4j` en vez de adivinar. Aplicar el mismo criterio con la
-   librería elegida en la tecnología nueva: revisar su documentación/firmas reales antes de
-   codear contra ella a ciegas.
+   genéricos "pesados" para fechas/horas — revisar su documentación/firmas reales (o el propio
+   código fuente) antes de codear contra ella a ciegas, en vez de adivinar la firma.
 4. **Validar temprano contra el feed .ics real del usuario**, no solo con eventos sintéticos de
    prueba — los dos bugs de arriba solo salieron a la luz con datos reales.
 5. **Excepciones de recurrencia (`RECURRENCE-ID`)**: una ocurrencia individual de una serie
@@ -286,17 +280,14 @@ no lo soporta de forma nativa.
 
 ## 6. Empaquetado y distribución
 
-- Salida final: **un único ejecutable** para Windows (equivalente al `CalendarTray.exe` que se
-  generaba con `jpackage` en la versión Java), sin necesidad de instalar un runtime aparte
-  (nada de "instalá el JRE primero" — justamente ese era el problema de la versión anterior).
-  Con Rust esto es natural (binario nativo estático o casi estático).
+- Salida final: **un único ejecutable** para Windows, sin necesidad de instalar ningún runtime
+  aparte. Con Rust esto es natural (binario nativo estático o casi estático).
 - El binario final debe poder distribuirse solo (copiar el `.exe` a otra máquina Windows y
   ejecutarlo ahí), sin necesitar llevar el código fuente ni el toolchain de compilación.
 
 ## 7. Requisitos no funcionales
 
-- **Memoria**: objetivo explícito de esta reescritura — bajar muy por debajo de los ~200 MB
-  que consumía la JVM en la versión Java. Con un stack nativo (Rust recomendado, ver §8) el
+- **Memoria**: objetivo explícito de esta reescritura — con un stack nativo (Rust, ver §8) el
   target razonable es de un dígito a bajos dos dígitos de MB en reposo.
 - **Arranque**: debe ser prácticamente instantáneo (sin el costo de arranque de una VM/runtime
   administrado).
@@ -384,25 +375,3 @@ como mapa de las piezas que existían y sus responsabilidades:
 - Detección real de "el usuario entró a la reunión" más allá de las dos acciones controladas
   por la app (click en ícono / click en "ir a la reunión", §2.1) — no es técnicamente viable
   sin integraciones adicionales, queda fuera de alcance.
-
-## 11. Historial / origen de este documento
-
-Esta especificación reconstruye el conocimiento acumulado en una sesión de desarrollo previa
-(2026-09-09) de la versión Java de Calendar Tray, cuyos fuentes se perdieron al borrarse
-accidentalmente la carpeta del proyecto. Se preserva aquí todo el conocimiento de dominio
-(reglas de negocio, decisiones y gotchas técnicos del formato iCalendar) para no tener que
-redescubrirlo en la reescritura nativa.
-
-**Actualización (2026-09-17)**: se cerraron las ambigüedades que quedaban abiertas para poder
-empezar a implementar — ventana de "próxima reunión" (rolling 24 h), semántica exacta del
-apagado de parpadeo, exclusión de eventos de día completo del semáforo, eventos cancelados,
-intervalo de refresco (5 min), manejo de feed inaccesible/primer arranque, y el diseño de las
-ventanas propias de Configuración y Agenda del día (con acciones de copiar/ir a la reunión por
-evento). Con esto la especificación se considera cerrada para empezar la reescritura en Rust.
-
-Misma fecha, segunda pasada: se sumaron mejoras de experiencia de usuario — tooltip del ícono,
-atajo de menú "ir a la próxima reunión", modo "no molestar", snooze corto, indicador de alerta
-ya vista y marca de conflicto de horario en la Agenda, detección de links de Zoom/Teams además
-de Meet, e historial de reuniones perdidas del día (§2.9). Las marcadas como v1.1 en el texto
-son candidatas a una segunda iteración, no bloquean el arranque de la v1 si se prioriza
-entregar antes.

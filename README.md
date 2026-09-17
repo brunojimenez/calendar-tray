@@ -119,10 +119,3 @@ Pendiente del plan original:
 
 - Seguir el tema claro/oscuro del sistema operativo.
 - Snooze corto y modo "no molestar" (los campos de configuración ya existen, falta la lógica).
-
-## Por qué existe esto
-
-Reescritura nativa (Rust) de una versión anterior en Java/Swing que se perdió al borrarse
-accidentalmente la carpeta de fuentes. El objetivo explícito de la reescritura fue bajar el
-consumo de memoria muy por debajo de los ~200 MB que ocupaba tener la JVM cargada solo para un
-ícono de bandeja.
