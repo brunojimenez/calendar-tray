@@ -169,10 +169,24 @@ impl AgendaWindow {
     /// Posiciona el flyout junto al punto del click en el ícono (normalmente la bandeja
     /// está abajo a la derecha, así que se ancla arriba-izquierda del punto). Llamar
     /// **después** de `rebuild`, que es quien fija el tamaño final de la ventana.
+    ///
+    /// El click puede llegar muy pegado al borde inferior de la pantalla (la bandeja vive
+    /// dentro de la barra de tareas), así que además de un margen generoso se clampea contra
+    /// el alto del monitor para que el flyout entero quede arriba de la barra, nunca tapado
+    /// por ella.
     pub fn position_near(&self, anchor_x: i32, anchor_y: i32) {
         let (w, h) = self.window.size();
-        let x = (anchor_x - w as i32 + 20).max(4);
-        let y = (anchor_y - h as i32 - 8).max(4);
+        let monitor_h = nwg::Monitor::height_from_window(&self.window);
+        let monitor_w = nwg::Monitor::width_from_window(&self.window);
+
+        const TASKBAR_MARGIN: i32 = 56; // alto tipico de la barra de tareas + aire
+
+        let x = (anchor_x - w as i32 + 20)
+            .max(4)
+            .min(monitor_w - w as i32 - 4);
+        let y = (anchor_y - h as i32 - TASKBAR_MARGIN)
+            .max(4)
+            .min(monitor_h - h as i32 - TASKBAR_MARGIN);
         self.window.set_position(x, y);
     }
 

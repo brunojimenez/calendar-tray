@@ -99,7 +99,7 @@ fn main() {
     let settings_id = settings_item.id().clone();
     let quit_id = quit_item.id().clone();
 
-    let icon = tray::build_icon(TrayState::Unconfigured)
+    let icon = tray::build_icon(TrayState::Unconfigured, 0.0)
         .expect("no se pudo construir el icono de bandeja");
 
     let tray_icon = TrayIconBuilder::new()
@@ -121,7 +121,7 @@ fn main() {
     let mut last_tick = Instant::now();
     let mut last_fetch_request = Instant::now() - refresh_interval; // fuerza el primer fetch ya
     let mut blink_phase = false;
-    let mut last_applied: Option<(TrayState, String)> = None;
+    let mut last_applied: Option<(TrayState, u8, String)> = None;
 
     if !unconfigured {
         let _ = fetch_request_tx.send(config.ics_feed_url.clone());
@@ -233,11 +233,14 @@ fn main() {
             state.compute_display(chrono::Utc::now(), &thresholds)
         };
 
-        let (desired_state, tooltip) = render(&display, blink_phase);
-        let applied_key = (desired_state, tooltip.clone());
+        let (desired_state, fill_fraction, tooltip) = render(&display, blink_phase);
+        // Redondeado a pasos de 5% -- evita reconstruir el icono en cada tick por jitter de
+        // punto flotante, pero igual se ve la arena avanzar con el paso del tiempo.
+        let fraction_bucket = (fill_fraction * 20.0).round() as u8;
+        let applied_key = (desired_state, fraction_bucket, tooltip.clone());
 
         if last_applied.as_ref() != Some(&applied_key) {
-            if let Ok(icon) = tray::build_icon(desired_state) {
+            if let Ok(icon) = tray::build_icon(desired_state, fill_fraction) {
                 let _ = tray_icon.set_icon(Some(icon));
             }
             let _ = tray_icon.set_tooltip(Some(&tooltip));
@@ -246,17 +249,28 @@ fn main() {
     });
 }
 
-/// Traduce el estado de dominio a (ícono, tooltip). El parpadeo alterna entre el color real
-/// y el estado neutro cada tick (SPEC.md §2.1).
-fn render(display: &DisplayState, blink_phase: bool) -> (TrayState, String) {
+/// Ventana visual de referencia para la arena del reloj (SPEC.md §2.1) -- no es un umbral
+/// funcional, solo define a partir de cuántos minutos de anticipación empieza a "caer" la
+/// arena en el ícono. Independiente de los umbrales de color configurables.
+const HOURGLASS_PROGRESS_WINDOW_MINUTES: f32 = 20.0;
+
+/// Traduce el estado de dominio a (ícono, fracción de arena caída, tooltip). El parpadeo
+/// alterna entre el color real y el estado neutro cada tick (SPEC.md §2.1).
+fn render(display: &DisplayState, blink_phase: bool) -> (TrayState, f32, String) {
     match display {
         DisplayState::Unconfigured => (
             TrayState::Unconfigured,
+            0.0,
             "Calendar Tray - sin configurar (click derecho > Configuración)".to_string(),
         ),
-        DisplayState::Error { message } => (TrayState::Error, format!("Calendar Tray - {message}")),
+        DisplayState::Error { message } => (
+            TrayState::Error,
+            0.0,
+            format!("Calendar Tray - {message}"),
+        ),
         DisplayState::Neutral => (
             TrayState::Neutral,
+            0.0,
             "Calendar Tray - sin reuniones próximas".to_string(),
         ),
         DisplayState::Meeting {
@@ -271,13 +285,17 @@ fn render(display: &DisplayState, blink_phase: bool) -> (TrayState, String) {
                 SemaphoreColor::Yellow => TrayState::Yellow,
                 SemaphoreColor::Red => TrayState::Red,
             };
-            let shown = if *blinking && blink_phase {
-                TrayState::Neutral
+            let fraction = (1.0
+                - (*minutes_remaining as f32 / HOURGLASS_PROGRESS_WINDOW_MINUTES))
+                .clamp(0.0, 1.0);
+
+            let (shown, shown_fraction) = if *blinking && blink_phase {
+                (TrayState::Neutral, 0.0)
             } else {
-                base
+                (base, fraction)
             };
             let tooltip = format!("{summary} en {minutes_remaining} min");
-            (shown, tooltip)
+            (shown, shown_fraction, tooltip)
         }
     }
 }
