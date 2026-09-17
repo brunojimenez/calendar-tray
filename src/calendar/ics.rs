@@ -1,12 +1,20 @@
 //! `IcsCalendarSource`: obtiene eventos desde la URL secreta de iCal de Google Calendar
-//! (SPEC.md §2.3).
+//! (SPEC.md §2.3). Incluye expansión de series recurrentes (RRULE) con soporte de
+//! excepciones puntuales (`RECURRENCE-ID`, SPEC.md §2.5 punto 5).
 
 use super::{CalendarError, CalendarEvent, CalendarSource, RsvpStatus};
 use chrono::{DateTime, Utc};
 use icalendar::{
-    Calendar, CalendarComponent, Component, DatePerhapsTime, EventLike, EventStatus, PartStat,
+    Calendar, CalendarComponent, Component, DatePerhapsTime, Event, EventLike, EventStatus,
+    PartStat,
 };
+use std::collections::HashMap;
 use std::time::Duration;
+
+/// Tope de ocurrencias a expandir por serie recurrente dentro de la ventana pedida — de
+/// sobra para el rango de a lo sumo un par de días que usa esta app (SPEC.md §2.1, §2.7),
+/// y evita iterar indefinidamente si una regla estuviera mal formada.
+const MAX_OCCURRENCES_PER_SERIES: u16 = 100;
 
 pub struct IcsCalendarSource {
     feed_url: String,
@@ -88,69 +96,173 @@ fn parse_and_filter_events(
         .parse()
         .map_err(|e| CalendarError::Parse(format!("{e:?}")))?;
 
-    let mut events = Vec::new();
+    // Primera pasada: separar series recurrentes (RRULE), excepciones puntuales
+    // (RECURRENCE-ID, SPEC.md §2.5 punto 5) y eventos sueltos — se resuelven distinto.
+    let mut recurring_masters: Vec<&Event> = Vec::new();
+    let mut overrides: HashMap<(String, DateTime<Utc>), &Event> = HashMap::new();
+    let mut single_events: Vec<&Event> = Vec::new();
 
     for component in &parsed.components {
         let CalendarComponent::Event(event) = component else {
             continue;
         };
 
-        // Cancelados se ocultan igual que DECLINED (SPEC.md §2.4).
-        if event.get_status() == Some(EventStatus::Cancelled) {
-            continue;
-        }
-
-        // Recurrencia (RRULE): todavia no se expande (ver doc del modulo y SPEC.md §2.5) —
-        // se omite en vez de mostrar solo la fecha de la primera ocurrencia, que seria
-        // enganoso.
-        if event.property_value("RRULE").is_some() {
-            continue;
-        }
-
-        let Some((start_utc, start_all_day)) =
-            event.get_start().and_then(|d| to_utc_and_all_day(&d))
-        else {
-            continue;
-        };
-
-        let end_utc = event
-            .get_end()
+        let recurrence_id = event
+            .get_recurrence_id()
             .and_then(|d| to_utc_and_all_day(&d))
-            .map(|(dt, _)| dt)
-            .unwrap_or(start_utc);
+            .map(|(dt, _)| dt);
 
-        if start_utc < from || start_utc >= to {
-            continue;
+        match recurrence_id {
+            Some(rid) => {
+                if let Some(uid) = event.get_uid() {
+                    overrides.insert((uid.to_string(), rid), event);
+                }
+            }
+            None if event.property_value("RRULE").is_some() => recurring_masters.push(event),
+            None => single_events.push(event),
         }
+    }
 
-        let rsvp = resolve_rsvp(event, user_email);
-        if rsvp == RsvpStatus::Declined {
-            continue;
-        }
+    let mut events = Vec::new();
 
-        let mut link_text = String::new();
-        if let Some(desc) = event.get_description() {
-            link_text.push_str(desc);
-            link_text.push(' ');
+    for event in single_events {
+        if let Some(e) = build_event_if_in_range(event, user_email, from, to) {
+            events.push(e);
         }
-        if let Some(loc) = event.get_location() {
-            link_text.push_str(loc);
-        }
-        let meeting_url = extract_meeting_url(&link_text);
+    }
 
-        events.push(CalendarEvent {
-            uid: event.get_uid().unwrap_or_default().to_string(),
-            summary: event.get_summary().unwrap_or("(sin titulo)").to_string(),
-            start: start_utc,
-            end: end_utc,
-            all_day: start_all_day,
-            rsvp,
-            meeting_url,
-        });
+    for master in recurring_masters {
+        expand_recurring_event(master, &overrides, user_email, from, to, &mut events);
     }
 
     events.sort_by_key(|e| e.start);
     Ok(events)
+}
+
+/// Expande una serie recurrente dentro de `[from, to)`, sustituyendo cada ocurrencia por su
+/// excepción puntual (`RECURRENCE-ID`) cuando exista (SPEC.md §2.5 punto 5): el motor de
+/// recurrencia no sabe nada de excepciones, solo expande RRULE/RDATE/EXDATE, así que hay que
+/// hacer el reemplazo acá antes de mostrar la ocurrencia "fantasma" sin editar.
+fn expand_recurring_event(
+    master: &Event,
+    overrides: &HashMap<(String, DateTime<Utc>), &Event>,
+    user_email: Option<&str>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    events: &mut Vec<CalendarEvent>,
+) {
+    // Serie cancelada entera (raro, pero posible) -> se oculta completa (SPEC.md §2.4).
+    if master.get_status() == Some(EventStatus::Cancelled) {
+        return;
+    }
+
+    // Eventos de dia completo recurrentes quedan fuera de esta v1 (gotcha de SPEC.md §2.5
+    // punto 1: no mezclar aritmetica de DATE con DATE-TIME) — se omiten en vez de calcular
+    // mal su horario.
+    if matches!(master.get_start(), Some(DatePerhapsTime::Date(_))) {
+        return;
+    }
+
+    let Some((master_start, _)) = master.get_start().and_then(|d| to_utc_and_all_day(&d)) else {
+        return;
+    };
+    let master_end = master
+        .get_end()
+        .and_then(|d| to_utc_and_all_day(&d))
+        .map(|(dt, _)| dt)
+        .unwrap_or(master_start);
+    let duration = master_end - master_start;
+
+    let Ok(rrule_set) = master.get_recurrence() else {
+        return; // RRULE invalida contra la libreria real -> se omite esa serie, no se adivina.
+    };
+
+    let uid = master.get_uid().unwrap_or_default().to_string();
+    let from_tz = from.with_timezone(&icalendar::Tz::UTC);
+    let to_tz = to.with_timezone(&icalendar::Tz::UTC);
+    let occurrences = rrule_set
+        .after(from_tz)
+        .before(to_tz)
+        .all(MAX_OCCURRENCES_PER_SERIES)
+        .dates;
+
+    for occurrence in occurrences {
+        let occ_start = occurrence.with_timezone(&Utc);
+
+        if let Some(&override_event) = overrides.get(&(uid.clone(), occ_start)) {
+            if let Some(e) = build_event_if_in_range(override_event, user_email, from, to) {
+                events.push(e);
+            }
+            continue;
+        }
+
+        let rsvp = resolve_rsvp(master, user_email);
+        if rsvp == RsvpStatus::Declined {
+            continue;
+        }
+
+        events.push(CalendarEvent {
+            uid: uid.clone(),
+            summary: master.get_summary().unwrap_or("(sin titulo)").to_string(),
+            start: occ_start,
+            end: occ_start + duration,
+            all_day: false,
+            rsvp,
+            meeting_url: extract_meeting_url(&link_text(master)),
+        });
+    }
+}
+
+/// Construye un `CalendarEvent` a partir de un VEVENT suelto (sin recurrencia) o de una
+/// excepción puntual de una serie, aplicando los filtros de SPEC.md §2.4 (RSVP/cancelados)
+/// y el rango `[from, to)`.
+fn build_event_if_in_range(
+    event: &Event,
+    user_email: Option<&str>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Option<CalendarEvent> {
+    if event.get_status() == Some(EventStatus::Cancelled) {
+        return None;
+    }
+
+    let (start_utc, start_all_day) = event.get_start().and_then(|d| to_utc_and_all_day(&d))?;
+    let end_utc = event
+        .get_end()
+        .and_then(|d| to_utc_and_all_day(&d))
+        .map(|(dt, _)| dt)
+        .unwrap_or(start_utc);
+
+    if start_utc < from || start_utc >= to {
+        return None;
+    }
+
+    let rsvp = resolve_rsvp(event, user_email);
+    if rsvp == RsvpStatus::Declined {
+        return None;
+    }
+
+    Some(CalendarEvent {
+        uid: event.get_uid().unwrap_or_default().to_string(),
+        summary: event.get_summary().unwrap_or("(sin titulo)").to_string(),
+        start: start_utc,
+        end: end_utc,
+        all_day: start_all_day,
+        rsvp,
+        meeting_url: extract_meeting_url(&link_text(event)),
+    })
+}
+
+fn link_text(event: &Event) -> String {
+    let mut text = String::new();
+    if let Some(desc) = event.get_description() {
+        text.push_str(desc);
+        text.push(' ');
+    }
+    if let Some(loc) = event.get_location() {
+        text.push_str(loc);
+    }
+    text
 }
 
 /// Reconoce links de Meet, Zoom y Teams en texto libre (SPEC.md §2.7: no limitarse a
@@ -270,7 +382,7 @@ END:VEVENT\r\n\
 END:VCALENDAR\r\n";
 
     #[test]
-    fn filtra_declined_cancelados_y_recurrentes_sin_expandir() {
+    fn filtra_declined_cancelados_y_expande_recurrentes() {
         let from = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let to = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
 
@@ -279,9 +391,76 @@ END:VCALENDAR\r\n";
 
         assert_eq!(
             uids,
-            vec!["allday-1@test", "accepted-1@test", "needs-action-1@test"],
-            "declined, cancelado, fuera-de-rango y recurrente (sin expandir) deben quedar afuera"
+            vec![
+                "allday-1@test",
+                "recurring-1@test",
+                "accepted-1@test",
+                "needs-action-1@test"
+            ],
+            "declined, cancelado y fuera-de-rango deben quedar afuera; la serie recurrente \
+             debe aparecer expandida (su primera ocurrencia cae en el rango)"
         );
+    }
+
+    #[test]
+    fn serie_recurrente_expande_multiples_ocurrencias_en_rango_amplio() {
+        // COUNT=5 semanal desde 2026-01-01 09:00 -> ocurrencias en las semanas 1,2,3,4,5.
+        let from = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 1, 22, 0, 0, 0).unwrap(); // 3 semanas
+
+        let events = parse_and_filter_events(FIXTURE, Some("me@wom.cl"), from, to).unwrap();
+        let occurrences: Vec<_> = events.iter().filter(|e| e.uid == "recurring-1@test").collect();
+
+        assert_eq!(occurrences.len(), 3, "deberian caer 3 ocurrencias semanales en 3 semanas");
+        assert_eq!(occurrences[0].start, Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap());
+        assert_eq!(occurrences[1].start, Utc.with_ymd_and_hms(2026, 1, 8, 9, 0, 0).unwrap());
+        assert_eq!(occurrences[2].start, Utc.with_ymd_and_hms(2026, 1, 15, 9, 0, 0).unwrap());
+    }
+
+    const RECURRENCE_WITH_OVERRIDE_FIXTURE: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//Test//Test//EN\r\n\
+BEGIN:VEVENT\r\n\
+UID:weekly-sync@test\r\n\
+DTSTAMP:20260101T000000Z\r\n\
+DTSTART:20260101T090000Z\r\n\
+DTEND:20260101T093000Z\r\n\
+RRULE:FREQ=WEEKLY;COUNT=4\r\n\
+SUMMARY:Weekly sync\r\n\
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@wom.cl\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:weekly-sync@test\r\n\
+DTSTAMP:20260101T000000Z\r\n\
+RECURRENCE-ID:20260108T090000Z\r\n\
+DTSTART:20260108T140000Z\r\n\
+DTEND:20260108T143000Z\r\n\
+SUMMARY:Weekly sync (movida a la tarde)\r\n\
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@wom.cl\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+    #[test]
+    fn excepcion_puntual_reemplaza_la_ocurrencia_fantasma_de_la_serie() {
+        let from = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 1, 23, 0, 0, 0).unwrap();
+
+        let events =
+            parse_and_filter_events(RECURRENCE_WITH_OVERRIDE_FIXTURE, Some("me@wom.cl"), from, to)
+                .unwrap();
+        let occurrences: Vec<_> = events.iter().filter(|e| e.uid == "weekly-sync@test").collect();
+
+        // 4 ocurrencias totales (COUNT=4), ninguna duplicada por la excepcion.
+        assert_eq!(occurrences.len(), 4);
+
+        // La semana 2 no aparece a las 09:00 (hora original) sino a las 14:00 (hora movida).
+        assert!(!occurrences
+            .iter()
+            .any(|e| e.start == Utc.with_ymd_and_hms(2026, 1, 8, 9, 0, 0).unwrap()));
+        assert!(occurrences
+            .iter()
+            .any(|e| e.start == Utc.with_ymd_and_hms(2026, 1, 8, 14, 0, 0).unwrap()
+                && e.summary == "Weekly sync (movida a la tarde)"));
     }
 
     #[test]

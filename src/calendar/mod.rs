@@ -48,9 +48,9 @@ impl std::error::Error for CalendarError {}
 /// `Declined` (SPEC.md §2.4) — ese filtro vive en el `CalendarSource`, no en el llamador,
 /// para que `MeetingClock` y la ventana de Agenda compartan el mismo criterio.
 ///
-/// Nota: esta primera versión **no expande RRULE todavía** (SPEC.md §2.5) — eventos
-/// recurrentes se devuelven tal cual viene su primera ocurrencia en el feed. La expansión
-/// de recurrencia se aborda en un paso aparte.
+/// Nota: las series recurrentes (RRULE) se expanden dentro del rango pedido, con soporte de
+/// excepciones puntuales (`RECURRENCE-ID`) — ver `ics::expand_recurring_event` y SPEC.md
+/// §2.5. Las series de eventos de día completo recurrentes quedan fuera de esta v1.
 pub trait CalendarSource {
     fn fetch_events(
         &self,
