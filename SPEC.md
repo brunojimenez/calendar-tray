@@ -102,10 +102,11 @@ de Windows.
 iCal que expone Google Calendar) como fuente **por defecto**, en vez de la API oficial de
 Google Calendar.
 
-- **Por qué**: la cuenta del usuario es una cuenta Google Workspace corporativa (dominio
-  `wom.cl`) administrada por IT. Para usar la API oficial hay que crear un proyecto en Google
-  Cloud Console, y la consola pide elegir un "recurso superior" (organización/carpeta) dentro
-  del dominio administrado — el admin del dominio no da permiso para crear proyectos ahí.
+- **Por qué**: en muchas cuentas Google Workspace corporativas administradas por IT, usar la
+  API oficial requiere crear un proyecto en Google Cloud Console, y la consola pide elegir un
+  "recurso superior" (organización/carpeta) dentro del dominio administrado — el admin del
+  dominio puede no dar permiso para crear proyectos ahí, dejando la API oficial inutilizable
+  sin intervención de IT.
   La "URL secreta" de iCal es una función nativa de Google Calendar (Configuración → Integrar
   calendario → "Dirección secreta en formato iCal"), no requiere Cloud Console, OAuth ni
   aprobación de IT.
@@ -289,8 +290,8 @@ no lo soporta de forma nativa.
   generaba con `jpackage` en la versión Java), sin necesidad de instalar un runtime aparte
   (nada de "instalá el JRE primero" — justamente ese era el problema de la versión anterior).
   Con Rust esto es natural (binario nativo estático o casi estático).
-- El plan de uso es: compilar en el equipo de casa (donde sí hay entorno de compilación),
-  y traer a este equipo **solo el ejecutable final**, no los fuentes ni el toolchain.
+- El binario final debe poder distribuirse solo (copiar el `.exe` a otra máquina Windows y
+  ejecutarlo ahí), sin necesitar llevar el código fuente ni el toolchain de compilación.
 
 ## 7. Requisitos no funcionales
 
@@ -313,36 +314,39 @@ no lo soporta de forma nativa.
 - **Idioma de la interfaz**: español (menú contextual, ventana de Configuración, ventana de
   Agenda del día) — no se requiere soporte multi-idioma.
 
-## 8. Tecnología recomendada para la reescritura
+## 8. Tecnología usada
 
-**Recomendación: Rust**, con:
+**Rust**, con:
 
-- Ícono de bandeja: crate tipo [`tray-icon`](https://crates.io/crates/tray-icon) (o
-  equivalente vigente al momento de implementar — verificar el ecosistema actual, no asumir
-  que sigue siendo el mismo crate/versión).
-- Ventana de configuración y ventana de agenda del día (**decisión cerrada: ambas son ventanas
-  propias de la app, no se delega a abrir el navegador** — ver §2.7 y §2.8, la ventana de
-  agenda necesita botones por evento que una vista web no da igual de simple): un toolkit
-  liviano tipo `egui`/`iced`. Queda descartada la opción de Win32/`windows-rs` puro sin
-  toolkit, porque ambas ventanas necesitan listas con filas de controles (botones con ícono,
-  formularios), no solo diálogos mínimos.
-- Parseo de ICS y expansión de RRULE: buscar el crate vigente equivalente a `ical4j`
-  (candidatos a evaluar al momento de implementar: `icalendar`, `rrule`, `ical`) — prestar
-  atención a los gotchas del §2.5, que son del formato iCalendar, no de una librería en
-  particular.
+- Ícono de bandeja: [`tray-icon`](https://crates.io/crates/tray-icon).
+- Ventana de configuración y ventana de agenda del día (ambas son ventanas propias de la app,
+  no se delega a abrir el navegador — ver §2.7 y §2.8, la ventana de agenda necesita botones
+  por evento que una vista web no da igual de simple):
+  [`native-windows-gui`](https://crates.io/crates/native-windows-gui) +
+  [`native-windows-derive`](https://crates.io/crates/native-windows-derive) — un wrapper fino
+  sobre controles Win32 nativos, no un motor de render inmediato. Se descartaron `egui`/`iced`
+  por arrastrar todo el stack de `wgpu` (GPU/Vulkan) y decenas de dependencias extra, algo
+  contrario al objetivo de memoria mínima de esta reescritura (ver §7) para algo tan simple
+  como una lista con botones y un formulario.
+- Parseo de ICS y expansión de RRULE:
+  [`icalendar`](https://crates.io/crates/icalendar) (con el feature `recurrence`, que a su vez
+  usa el crate [`rrule`](https://crates.io/crates/rrule) para la aritmética de calendario) —
+  ver los gotchas del §2.5, que son del formato iCalendar, no de esta librería en particular.
+- Descarga del feed: [`ureq`](https://crates.io/crates/ureq) (cliente HTTP bloqueante, corre en
+  un thread aparte del de la interfaz — ver §9).
+- Configuración: [`serde`](https://crates.io/crates/serde) + [`toml`](https://crates.io/crates/toml).
+- Autoarranque: [`winreg`](https://crates.io/crates/winreg) (acceso al registro de Windows).
+- Manifest de la app (DPI-awareness + tema visual moderno de los controles):
+  [`embed-manifest`](https://crates.io/crates/embed-manifest), embebido vía `build.rs`.
 - Por qué Rust y no las alternativas evaluadas:
   - **Go** (`systray` + `Fyne`/`Walk`): API más simple, memoria baja (~10-20 MB), pero
     ecosistema de UI nativa en Windows más limitado.
   - **C#/.NET con Native AOT**: estilo más parecido a Java (más cercano a lo ya conocido),
     buen soporte de tray en Windows (WinForms/WPF), Native AOT baja bastante el consumo vs. la
     JVM tradicional, pero no llega al nivel de Rust/Go.
-  - Se prioriza Rust por dar la menor huella de memoria posible (objetivo explícito de esta
-    reescritura) a costa de una curva de aprendizaje algo mayor si no se conoce el lenguaje —
-    aceptable dado que el desarrollo se hará con asistencia de Claude en el equipo de casa.
-
-> Esta sección es una recomendación de partida, no una decisión cerrada — al retomar el
-> desarrollo en el equipo de casa, validar disponibilidad y madurez actual de los crates antes
-> de comprometerse.
+  - Se priorizó Rust por dar la menor huella de memoria posible (objetivo explícito de esta
+    reescritura) a costa de una curva de aprendizaje algo mayor si no se conocía el lenguaje de
+    entrada.
 
 ## 9. Estructura de referencia (versión anterior, solo como mapa conceptual)
 
