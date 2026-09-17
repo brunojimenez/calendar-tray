@@ -6,6 +6,7 @@ mod app_state;
 mod calendar;
 mod config;
 mod meeting_clock;
+mod settings_window;
 mod tray;
 
 use app_state::{AppState, DisplayState};
@@ -14,6 +15,8 @@ use calendar::{CalendarError, CalendarEvent, CalendarSource};
 use config::AppConfig;
 use meeting_clock::SemaphoreColor;
 use native_windows_gui as nwg;
+use nwg::NativeUi;
+use settings_window::SettingsWindow;
 use std::sync::mpsc;
 use std::time::{Duration as StdDuration, Instant};
 use tray::TrayState;
@@ -26,38 +29,44 @@ const TICK_INTERVAL: StdDuration = StdDuration::from_millis(500);
 const RESUME_GAP_THRESHOLD: StdDuration = StdDuration::from_secs(120);
 
 fn main() {
-    let config = AppConfig::load_or_default();
-    let thresholds = app_state::thresholds_from(
+    let mut config = AppConfig::load_or_default();
+    let mut thresholds = app_state::thresholds_from(
         config.green_threshold_minutes,
         config.yellow_threshold_minutes,
         config.blink_threshold_minutes,
     );
-    let refresh_interval = StdDuration::from_secs(config.refresh_interval_minutes as u64 * 60);
+    let mut refresh_interval =
+        StdDuration::from_secs(config.refresh_interval_minutes as u64 * 60);
 
-    let (fetch_request_tx, fetch_request_rx) = mpsc::channel::<()>();
+    // El thread de fetch recibe la URL en cada pedido (en vez de fijarla una sola vez al
+    // arrancar) para poder atender cambios guardados desde la ventana de Configuración sin
+    // tener que reiniciar el proceso.
+    let (fetch_request_tx, fetch_request_rx) = mpsc::channel::<String>();
     let (fetch_result_tx, fetch_result_rx) = mpsc::channel::<Result<Vec<CalendarEvent>, String>>();
 
-    if !config.is_unconfigured() {
-        let source = IcsCalendarSource::new(config.ics_feed_url.clone());
-        std::thread::spawn(move || {
-            while fetch_request_rx.recv().is_ok() {
-                let now = chrono::Utc::now();
-                let result = source
-                    .fetch_events(now, now + chrono::Duration::hours(24))
-                    .map_err(|e: CalendarError| e.to_string());
-                if fetch_result_tx.send(result).is_err() {
-                    break;
-                }
+    std::thread::spawn(move || {
+        while let Ok(url) = fetch_request_rx.recv() {
+            let source = IcsCalendarSource::new(url);
+            let now = chrono::Utc::now();
+            let result = source
+                .fetch_events(now, now + chrono::Duration::hours(24))
+                .map_err(|e: CalendarError| e.to_string());
+            if fetch_result_tx.send(result).is_err() {
+                break;
             }
-        });
-    }
+        }
+    });
 
     nwg::init().expect("no se pudo inicializar native-windows-gui");
 
     let menu = Menu::new();
+    let settings_item = MenuItem::new("Configuración", true, None);
     let quit_item = MenuItem::new("Salir", true, None);
+    menu.append(&settings_item)
+        .expect("no se pudo agregar el item 'Configuracion' al menu");
     menu.append(&quit_item)
         .expect("no se pudo agregar el item 'Salir' al menu");
+    let settings_id = settings_item.id().clone();
     let quit_id = quit_item.id().clone();
 
     let icon = tray::build_icon(TrayState::Unconfigured)
@@ -71,7 +80,8 @@ fn main() {
         .expect("no se pudo crear el icono de bandeja");
 
     let mut state = AppState::default();
-    let unconfigured = config.is_unconfigured();
+    let mut unconfigured = config.is_unconfigured();
+    let mut settings_ui: Option<_> = None;
 
     let mut last_tick = Instant::now();
     let mut last_fetch_request = Instant::now() - refresh_interval; // fuerza el primer fetch ya
@@ -79,7 +89,7 @@ fn main() {
     let mut last_applied: Option<(TrayState, String)> = None;
 
     if !unconfigured {
-        let _ = fetch_request_tx.send(());
+        let _ = fetch_request_tx.send(config.ics_feed_url.clone());
         last_fetch_request = Instant::now();
     }
 
@@ -108,6 +118,38 @@ fn main() {
                 nwg::stop_thread_dispatch();
                 return;
             }
+            if event.id == settings_id {
+                if settings_ui.is_none() {
+                    settings_ui = SettingsWindow::build_ui(Default::default())
+                        .map_err(|e| eprintln!("no se pudo crear la ventana de Configuracion: {e}"))
+                        .ok();
+                }
+                if let Some(ui) = &settings_ui {
+                    ui.load_from(&config);
+                    ui.window.set_visible(true);
+                }
+            }
+        }
+
+        // Config guardada desde la ventana de Configuración (SPEC.md §2.8): se aplica acá,
+        // en el thread único que también toca el ícono y el thread de fetch.
+        if let Some(ui) = &settings_ui {
+            if let Some(new_config) = ui.pending_config.borrow_mut().take() {
+                let url_changed = new_config.ics_feed_url != config.ics_feed_url;
+                config = new_config;
+                thresholds = app_state::thresholds_from(
+                    config.green_threshold_minutes,
+                    config.yellow_threshold_minutes,
+                    config.blink_threshold_minutes,
+                );
+                refresh_interval = StdDuration::from_secs(config.refresh_interval_minutes as u64 * 60);
+                unconfigured = config.is_unconfigured();
+
+                if !unconfigured && url_changed {
+                    let _ = fetch_request_tx.send(config.ics_feed_url.clone());
+                    last_fetch_request = Instant::now();
+                }
+            }
         }
 
         if let Ok(result) = fetch_result_rx.try_recv() {
@@ -127,11 +169,11 @@ fn main() {
 
         if elapsed_since_tick > RESUME_GAP_THRESHOLD && !unconfigured {
             // Probable resume de suspensión: forzar refetch inmediato (SPEC.md §2.6).
-            let _ = fetch_request_tx.send(());
+            let _ = fetch_request_tx.send(config.ics_feed_url.clone());
             last_fetch_request = now_instant;
         } else if !unconfigured && now_instant.duration_since(last_fetch_request) >= refresh_interval
         {
-            let _ = fetch_request_tx.send(());
+            let _ = fetch_request_tx.send(config.ics_feed_url.clone());
             last_fetch_request = now_instant;
         }
 
@@ -163,11 +205,13 @@ fn render(display: &DisplayState, blink_phase: bool) -> (TrayState, String) {
     match display {
         DisplayState::Unconfigured => (
             TrayState::Unconfigured,
-            "Calendar Tray - sin configurar (edita %APPDATA%\\CalendarTray\\config.toml)"
-                .to_string(),
+            "Calendar Tray - sin configurar (click derecho > Configuración)".to_string(),
         ),
         DisplayState::Error { message } => (TrayState::Error, format!("Calendar Tray - {message}")),
-        DisplayState::Neutral => (TrayState::Neutral, "Calendar Tray - sin reuniones próximas".to_string()),
+        DisplayState::Neutral => (
+            TrayState::Neutral,
+            "Calendar Tray - sin reuniones próximas".to_string(),
+        ),
         DisplayState::Meeting {
             summary,
             minutes_remaining,
