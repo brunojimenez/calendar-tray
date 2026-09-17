@@ -8,24 +8,40 @@ mod calendar;
 mod config;
 mod diagnostics;
 mod meeting_clock;
+mod notifications;
 mod settings_window;
+mod toast_window;
 mod tray;
 
 use agenda_window::AgendaWindow;
-use chrono::TimeZone;
 use app_state::{AppState, DisplayState};
 use calendar::ics::IcsCalendarSource;
 use calendar::{CalendarError, CalendarEvent, CalendarSource};
+use chrono::TimeZone;
 use config::AppConfig;
 use meeting_clock::SemaphoreColor;
 use native_windows_gui as nwg;
+use notifications::{NotificationTracker, Phase};
 use nwg::NativeUi;
 use settings_window::SettingsWindow;
 use std::sync::mpsc;
 use std::time::{Duration as StdDuration, Instant};
+use toast_window::ToastWindow;
 use tray::TrayState;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+/// Cuánto queda visible el toast antes de desaparecer solo (pedido explícito: "algunos
+/// segundos y desaparezca", SPEC.md — mejora de UX conversada, no en el documento original).
+const TOAST_VISIBLE_DURATION: StdDuration = StdDuration::from_secs(5);
+
+fn toast_accent_rgb(phase: Phase) -> [u8; 3] {
+    match phase {
+        Phase::Green => [46, 160, 67],
+        Phase::Yellow => [212, 168, 24],
+        Phase::Red | Phase::Started => [201, 42, 42],
+    }
+}
 
 const TICK_INTERVAL: StdDuration = StdDuration::from_millis(500);
 /// Si entre dos ticks pasa mucho más que `TICK_INTERVAL`, asumimos que el equipo salió de
@@ -117,6 +133,9 @@ fn main() {
     let mut unconfigured = config.is_unconfigured();
     let mut settings_ui: Option<_> = None;
     let mut agenda_ui: Option<_> = None;
+    let mut toast_ui: Option<_> = None;
+    let mut notification_tracker = NotificationTracker::default();
+    let mut toast_hide_at: Option<Instant> = None;
 
     let mut last_tick = Instant::now();
     let mut last_fetch_request = Instant::now() - refresh_interval; // fuerza el primer fetch ya
@@ -227,10 +246,36 @@ fn main() {
         last_tick = now_instant;
         blink_phase = !blink_phase;
 
+        let now = chrono::Utc::now();
+
+        if !unconfigured {
+            for toast in notification_tracker.tick(&state.cached_events, now, &thresholds) {
+                if toast_ui.is_none() {
+                    toast_ui = ToastWindow::build_ui(Default::default())
+                        .map_err(|e| eprintln!("no se pudo crear el toast: {e}"))
+                        .ok();
+                }
+                if let Some(ui) = &toast_ui {
+                    let text = notifications::format_toast(&toast);
+                    ui.show(&text, toast_accent_rgb(toast.phase));
+                    toast_hide_at = Some(now_instant + TOAST_VISIBLE_DURATION);
+                }
+            }
+        }
+
+        if let Some(hide_at) = toast_hide_at {
+            if now_instant >= hide_at {
+                if let Some(ui) = &toast_ui {
+                    ui.hide();
+                }
+                toast_hide_at = None;
+            }
+        }
+
         let display = if unconfigured {
             DisplayState::Unconfigured
         } else {
-            state.compute_display(chrono::Utc::now(), &thresholds)
+            state.compute_display(now, &thresholds)
         };
 
         let (desired_state, fill_fraction, tooltip) = render(&display, blink_phase);

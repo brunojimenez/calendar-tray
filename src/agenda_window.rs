@@ -4,11 +4,12 @@
 //!
 //! Muestra **todas** las actividades del día (no solo la ventana de 24h del semáforo del
 //! ícono), con un indicador de color por fila según el estado temporal de cada una — igual
-//! al comportamiento de la versión Java anterior:
+//! al comportamiento de la versión Java anterior, y con los **mismos umbrales verde/amarillo
+//! que el ícono de bandeja** para que ambos siempre concuerden:
 //! - Gris: ya pasó.
-//! - Rojo: está ocurriendo ahora mismo.
-//! - Amarillo: está por empezar (dentro del umbral "cercano").
-//! - Verde: todavía falta.
+//! - Rojo: está ocurriendo ahora, o le quedan ≤ umbral amarillo minutos (igual que el ícono).
+//! - Amarillo: le quedan entre el umbral amarillo y el umbral verde.
+//! - Verde: todavía falta más del umbral verde.
 //! - Azul: evento de día completo (no encaja en la escala temporal de arriba).
 
 use crate::calendar::CalendarEvent;
@@ -48,15 +49,26 @@ impl RowStatus {
     }
 }
 
-fn classify_row(event: &CalendarEvent, now: DateTime<Utc>, near_minutes: i64) -> RowStatus {
+/// Usa los mismos umbrales verde/amarillo que el semáforo del ícono (meeting_clock::
+/// classify_color) — antes esta función tenía su propio corte de "amarillo" (<=5 min) que
+/// no coincidía con el del ícono (banda 5-15 min), así que el ícono podía verse amarillo sin
+/// que ninguna fila de la Agenda apareciera amarilla. Ahora comparten exactamente la misma
+/// lógica de bandas, solo que acá además hay "pasada" y "en curso" que el ícono no muestra.
+fn classify_row(event: &CalendarEvent, now: DateTime<Utc>, thresholds: &Thresholds) -> RowStatus {
     if event.all_day {
         return RowStatus::AllDay;
     }
     if event.end <= now {
-        RowStatus::Past
-    } else if event.start <= now {
-        RowStatus::Ongoing
-    } else if (event.start - now).num_minutes() <= near_minutes {
+        return RowStatus::Past;
+    }
+    if event.start <= now {
+        return RowStatus::Ongoing;
+    }
+
+    let minutes_remaining = (event.start - now).num_minutes();
+    if minutes_remaining <= thresholds.yellow_minutes as i64 {
+        RowStatus::Ongoing // mismo rojo que el icono: "inminente", aunque no haya arrancado
+    } else if minutes_remaining <= thresholds.green_minutes as i64 {
         RowStatus::Near
     } else {
         RowStatus::Future
@@ -108,7 +120,7 @@ impl AgendaWindow {
         let mut rows = self.rows.borrow_mut();
         for (i, event) in events.iter().enumerate() {
             let y = ROWS_TOP + (i as i32) * ROW_HEIGHT;
-            let status = classify_row(event, now, thresholds.yellow_minutes as i64);
+            let status = classify_row(event, now, thresholds);
 
             let mut dot = nwg::Label::default();
             nwg::Label::builder()
@@ -362,14 +374,33 @@ mod tests {
         }
     }
 
+    fn test_thresholds() -> Thresholds {
+        Thresholds {
+            green_minutes: 15,
+            yellow_minutes: 5,
+            blink_minutes: 1,
+        }
+    }
+
     #[test]
     fn clasifica_pasada_actual_cercana_y_futura() {
         let t = now();
-        assert!(matches!(classify_row(&event("a", -120, 30, false), t, 15), RowStatus::Past));
-        assert!(matches!(classify_row(&event("b", -10, 30, false), t, 15), RowStatus::Ongoing));
-        assert!(matches!(classify_row(&event("c", 10, 30, false), t, 15), RowStatus::Near));
-        assert!(matches!(classify_row(&event("d", 120, 30, false), t, 15), RowStatus::Future));
-        assert!(matches!(classify_row(&event("e", 0, 30, true), t, 15), RowStatus::AllDay));
+        let th = test_thresholds();
+        assert!(matches!(classify_row(&event("a", -120, 30, false), t, &th), RowStatus::Past));
+        assert!(matches!(classify_row(&event("b", -10, 30, false), t, &th), RowStatus::Ongoing));
+        assert!(matches!(classify_row(&event("e", 0, 30, true), t, &th), RowStatus::AllDay));
+    }
+
+    #[test]
+    fn usa_las_mismas_bandas_verde_amarillo_rojo_que_el_icono() {
+        // Mismos umbrales que meeting_clock::classify_color -- si el icono da amarillo,
+        // la fila correspondiente en la Agenda tambien debe dar amarillo (bug reportado:
+        // antes el corte de "amarillo" de la Agenda era distinto al del icono).
+        let t = now();
+        let th = test_thresholds();
+        assert!(matches!(classify_row(&event("verde", 20, 30, false), t, &th), RowStatus::Future));
+        assert!(matches!(classify_row(&event("amarillo", 10, 30, false), t, &th), RowStatus::Near));
+        assert!(matches!(classify_row(&event("rojo-inminente", 3, 30, false), t, &th), RowStatus::Ongoing));
     }
 
     #[test]

@@ -42,24 +42,45 @@ pub fn find_next_meeting(
     now: DateTime<Utc>,
     thresholds: &Thresholds,
 ) -> Option<NextMeeting> {
+    find_next_meetings(events, now, thresholds).into_iter().next()
+}
+
+/// Igual que `find_next_meeting`, pero devuelve **todas** las reuniones empatadas en el
+/// horario más cercano (SPEC.md §2.1: "ambas son próximas" cuando coinciden en horario) —
+/// usado para agrupar notificaciones cuando dos reuniones arrancan juntas.
+pub fn find_next_meetings(
+    events: &[CalendarEvent],
+    now: DateTime<Utc>,
+    thresholds: &Thresholds,
+) -> Vec<NextMeeting> {
     let horizon = now + LOOKAHEAD;
 
-    let event = events
+    let earliest_start = events
         .iter()
         .filter(|e| !e.all_day)
         .filter(|e| e.start > now && e.start < horizon)
-        .min_by_key(|e| e.start)?;
+        .map(|e| e.start)
+        .min();
 
-    let minutes_remaining = (event.start - now).num_minutes();
-    let color = classify_color(minutes_remaining, thresholds);
-    let blinking = minutes_remaining <= thresholds.blink_minutes as i64;
+    let Some(earliest_start) = earliest_start else {
+        return Vec::new();
+    };
 
-    Some(NextMeeting {
-        event: event.clone(),
-        minutes_remaining,
-        color,
-        blinking,
-    })
+    events
+        .iter()
+        .filter(|e| !e.all_day && e.start == earliest_start)
+        .map(|event| {
+            let minutes_remaining = (event.start - now).num_minutes();
+            let color = classify_color(minutes_remaining, thresholds);
+            let blinking = minutes_remaining <= thresholds.blink_minutes as i64;
+            NextMeeting {
+                event: event.clone(),
+                minutes_remaining,
+                color,
+                blinking,
+            }
+        })
+        .collect()
 }
 
 fn classify_color(minutes_remaining: i64, thresholds: &Thresholds) -> SemaphoreColor {
@@ -138,6 +159,23 @@ mod tests {
         let events = vec![event_at("manana-tarde", 25 * 60, now, false)];
 
         assert!(find_next_meeting(&events, now, &thresholds()).is_none());
+    }
+
+    #[test]
+    fn find_next_meetings_agrupa_reuniones_empatadas_en_horario() {
+        let now = now();
+        let events = vec![
+            event_at("a", 10, now, false),
+            event_at("b", 10, now, false),
+            event_at("c", 60, now, false), // no empata, mas lejos
+        ];
+
+        let next = find_next_meetings(&events, now, &thresholds());
+        let uids: Vec<&str> = next.iter().map(|m| m.event.uid.as_str()).collect();
+
+        assert_eq!(uids.len(), 2);
+        assert!(uids.contains(&"a"));
+        assert!(uids.contains(&"b"));
     }
 
     #[test]

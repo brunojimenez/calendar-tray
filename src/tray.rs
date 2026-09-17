@@ -1,8 +1,8 @@
 //! Construcción del ícono de bandeja — reloj de arena (SPEC.md §2.1, §2.6).
 //!
-//! Silueta del reloj dibujada a mano (marco + paredes diagonales) con la arena
-//! acumulándose abajo a medida que se acerca la próxima reunión — nada de sprites/PNG,
-//! todo generado en runtime como buffer RGBA.
+//! Silueta dibujada a mano (vidrio + marco en tono neutro, arena del color de estado
+//! acumulándose abajo) y renderizada con supersampling 4x para que los bordes diagonales y
+//! las puntas redondeadas no se vean pixeladas/toscas a 32px.
 
 use tray_icon::{BadIcon, Icon};
 
@@ -22,41 +22,53 @@ pub enum TrayState {
 }
 
 impl TrayState {
-    fn rgb(self) -> [u8; 3] {
+    fn sand_rgb(self) -> [f32; 3] {
         match self {
-            TrayState::Unconfigured => [140, 140, 140],
-            TrayState::Error => [100, 100, 100],
-            TrayState::Neutral => [170, 170, 170],
-            TrayState::Green => [46, 160, 67],
-            TrayState::Yellow => [212, 168, 24],
-            TrayState::Red => [201, 42, 42],
+            TrayState::Unconfigured => [150.0, 150.0, 150.0],
+            TrayState::Error => [110.0, 110.0, 110.0],
+            TrayState::Neutral => [180.0, 180.0, 180.0],
+            TrayState::Green => [52.0, 172.0, 78.0],
+            TrayState::Yellow => [224.0, 176.0, 30.0],
+            TrayState::Red => [214.0, 51.0, 51.0],
         }
     }
 }
 
-const SIZE: i32 = ICON_SIZE as i32;
-const CENTER_X: f32 = SIZE as f32 / 2.0;
-const TOP: i32 = 3;
-const BOTTOM: i32 = SIZE - 3; // 29
-const CAP: i32 = 2; // grosor de las barras horizontales arriba/abajo
-const NECK: i32 = SIZE / 2; // 16
-const OUTER_HALF_WIDTH: f32 = 12.0;
-const NECK_HALF_WIDTH: f32 = 1.5;
-const OUTLINE_THICKNESS: f32 = 1.6;
+/// Marco/vidrio en un tono neutro claro — separado del color de estado (que solo tiñe la
+/// arena) para que se lea como "reloj de vidrio con arena de color" en vez de una silueta
+/// monocromática plana.
+const FRAME_RGB: [f32; 3] = [225.0, 225.0, 230.0];
 
-/// Medio-ancho del vidrio en la fila `y` (distancia al centro), interpolando linealmente
-/// entre el borde exterior y el cuello.
-fn half_width_at(y: i32) -> f32 {
-    if y <= TOP + CAP {
-        OUTER_HALF_WIDTH
+const SS: i32 = 4; // supersampling factor
+const SIZE: i32 = ICON_SIZE as i32;
+const HSIZE: i32 = SIZE * SS; // resolucion interna de trabajo
+
+const CENTER_X: f32 = (HSIZE as f32) / 2.0;
+const TOP: f32 = 3.0 * SS as f32;
+const BOTTOM: f32 = (SIZE - 3) as f32 * SS as f32;
+const CAP: f32 = 2.2 * SS as f32; // grosor de las barras/puntas arriba y abajo
+const NECK: f32 = (SIZE as f32 / 2.0) * SS as f32;
+const OUTER_HALF_WIDTH: f32 = 11.5 * SS as f32;
+const NECK_HALF_WIDTH: f32 = 1.3 * SS as f32;
+const FRAME_THICKNESS: f32 = 1.7 * SS as f32;
+/// Redondeo de las puntas (arriba/abajo), para que no sean barras cuadradas "toscas".
+const CAP_ROUNDING: f32 = 1.6 * SS as f32;
+
+fn half_width_at(y: f32) -> f32 {
+    if y < TOP + CAP {
+        // Punta superior: se angosta levemente hacia el borde (redondeada) en vez de una
+        // barra recta de esquinas duras.
+        let t = ((y - TOP) / CAP).clamp(0.0, 1.0);
+        OUTER_HALF_WIDTH - CAP_ROUNDING * (1.0 - t)
     } else if y < NECK {
-        let t = (y - (TOP + CAP)) as f32 / (NECK - (TOP + CAP)) as f32;
+        let t = (y - (TOP + CAP)) / (NECK - (TOP + CAP));
         OUTER_HALF_WIDTH + (NECK_HALF_WIDTH - OUTER_HALF_WIDTH) * t
     } else if y < BOTTOM - CAP {
-        let t = (y - NECK) as f32 / ((BOTTOM - CAP) - NECK) as f32;
+        let t = (y - NECK) / ((BOTTOM - CAP) - NECK);
         NECK_HALF_WIDTH + (OUTER_HALF_WIDTH - NECK_HALF_WIDTH) * t
     } else {
-        OUTER_HALF_WIDTH
+        let t = ((y - (BOTTOM - CAP)) / CAP).clamp(0.0, 1.0);
+        OUTER_HALF_WIDTH - CAP_ROUNDING * t
     }
 }
 
@@ -64,48 +76,62 @@ fn half_width_at(y: i32) -> f32 {
 ///
 /// `fill_fraction` (0.0..=1.0) es cuánta arena ya "cayó" al fondo — 0.0 recién arrancó la
 /// cuenta regresiva (arena toda arriba), 1.0 está por empezar la reunión (arena toda abajo).
-/// Para estados sin cuenta regresiva (Neutral/Error/Unconfigured) se pasa 0.0: el reloj se
-/// ve "recién dado vuelta", vacío abajo.
+/// Para estados sin cuenta regresiva (Neutral/Error/Unconfigured) se pasa 0.0.
 pub fn build_icon(state: TrayState, fill_fraction: f32) -> Result<Icon, BadIcon> {
-    let [r, g, b] = state.rgb();
+    let sand = state.sand_rgb();
     let fill_fraction = fill_fraction.clamp(0.0, 1.0);
-    let sand_top_y = BOTTOM as f32 - fill_fraction * (BOTTOM - CAP - NECK) as f32;
+    let sand_top_y = BOTTOM - fill_fraction * (BOTTOM - CAP - NECK);
 
-    let mut rgba = vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize];
-    let mut put = |x: i32, y: i32, alpha: u8| {
-        if x < 0 || y < 0 || x >= SIZE || y >= SIZE || alpha == 0 {
-            return;
-        }
-        let idx = ((y * SIZE + x) * 4) as usize;
-        // Combina por si el pixel ya tiene algo de alpha (evita bordes duros feos al superponer
-        // el contorno diagonal con las barras horizontales).
-        let existing = rgba[idx + 3];
-        if alpha > existing {
-            rgba[idx] = r;
-            rgba[idx + 1] = g;
-            rgba[idx + 2] = b;
-            rgba[idx + 3] = alpha;
-        }
-    };
+    // Paso 1: renderizar a resolucion HSIZE x HSIZE (hard-edged, sin AA).
+    let mut hi = vec![[0f32; 4]; (HSIZE * HSIZE) as usize];
+    for y in 0..HSIZE {
+        let yf = y as f32 + 0.5;
+        let hw = half_width_at(yf);
+        let is_cap_row = yf < TOP + CAP || yf >= BOTTOM - CAP;
+        let is_sand_row = yf >= sand_top_y && yf >= NECK;
 
-    for y in TOP..BOTTOM {
-        let hw = half_width_at(y);
-        let is_cap_row = y < TOP + CAP || y >= BOTTOM - CAP;
-        let is_sand_row = y as f32 >= sand_top_y && y >= NECK;
-
-        for x in 0..SIZE {
+        for x in 0..HSIZE {
             let dx = (x as f32 + 0.5 - CENTER_X).abs();
             if dx > hw {
                 continue;
             }
-
+            let idx = (y * HSIZE + x) as usize;
             if is_cap_row || is_sand_row {
-                // Barra superior/inferior solida, o arena acumulada: relleno completo.
-                put(x, y, 255);
-            } else if dx >= hw - OUTLINE_THICKNESS {
-                // Pared diagonal del vidrio: solo el contorno, hueco por dentro.
-                put(x, y, 255);
+                let [r, g, b] = sand;
+                hi[idx] = [r, g, b, 255.0];
+            } else if dx >= hw - FRAME_THICKNESS {
+                let [r, g, b] = FRAME_RGB;
+                hi[idx] = [r, g, b, 235.0];
             }
+        }
+    }
+
+    // Paso 2: downsample SSxSS -> antialiasing gratis promediando bloques.
+    let mut rgba = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
+    let norm = (SS * SS) as f32;
+    for by in 0..SIZE {
+        for bx in 0..SIZE {
+            let mut acc = [0f32; 4];
+            for oy in 0..SS {
+                for ox in 0..SS {
+                    let idx = ((by * SS + oy) * HSIZE + (bx * SS + ox)) as usize;
+                    let px = hi[idx];
+                    acc[0] += px[0] * px[3];
+                    acc[1] += px[1] * px[3];
+                    acc[2] += px[2] * px[3];
+                    acc[3] += px[3];
+                }
+            }
+            let alpha = acc[3] / norm;
+            let (r, g, b) = if acc[3] > 0.0 {
+                (acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3])
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+            rgba.push(r.round() as u8);
+            rgba.push(g.round() as u8);
+            rgba.push(b.round() as u8);
+            rgba.push(alpha.round().clamp(0.0, 255.0) as u8);
         }
     }
 
