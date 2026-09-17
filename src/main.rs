@@ -4,6 +4,7 @@
 
 mod agenda_window;
 mod app_state;
+mod autostart;
 mod calendar;
 mod config;
 mod diagnostics;

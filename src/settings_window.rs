@@ -1,10 +1,11 @@
 //! Ventana de Configuración (SPEC.md §2.8). Se abre desde el menú contextual, edita el
 //! feed ICS y los umbrales del semáforo, y guarda en `%APPDATA%\CalendarTray\config.toml`.
 //!
-//! Campos no editables todavía acá (tema, autoarranque, snooze, no-molestar) porque su
-//! funcionalidad de fondo no está implementada aún — se agregan a este formulario cuando
-//! esos pasos del plan lleguen, para no mostrar controles que no hacen nada.
+//! Campos no editables todavía acá (tema, snooze, no-molestar) porque su funcionalidad de
+//! fondo no está implementada aún — se agregan a este formulario cuando esos pasos del plan
+//! lleguen, para no mostrar controles que no hacen nada. Autoarranque sí (SPEC.md §4).
 
+use crate::autostart;
 use crate::config::AppConfig;
 use native_windows_derive as nwd;
 use native_windows_gui as nwg;
@@ -14,7 +15,7 @@ use std::sync::mpsc::Sender;
 
 #[derive(Default, NwgUi)]
 pub struct SettingsWindow {
-    #[nwg_control(size: (380, 280), position: (300, 300), title: "Configuración - Calendar Tray", flags: "WINDOW")]
+    #[nwg_control(size: (380, 310), position: (300, 300), title: "Configuración - Calendar Tray", flags: "WINDOW")]
     #[nwg_events( OnWindowClose: [SettingsWindow::on_close] )]
     pub window: nwg::Window,
 
@@ -46,11 +47,14 @@ pub struct SettingsWindow {
     #[nwg_control(text: "5", position: (240, 158), size: (120, 24))]
     pub refresh_input: nwg::TextInput,
 
-    #[nwg_control(text: "Guardar", position: (12, 220), size: (170, 32))]
+    #[nwg_control(text: "Iniciar automáticamente con Windows", position: (12, 190), size: (350, 24))]
+    pub autostart_checkbox: nwg::CheckBox,
+
+    #[nwg_control(text: "Guardar", position: (12, 250), size: (170, 32))]
     #[nwg_events( OnButtonClick: [SettingsWindow::on_save] )]
     save_button: nwg::Button,
 
-    #[nwg_control(text: "Cancelar", position: (198, 220), size: (170, 32))]
+    #[nwg_control(text: "Cancelar", position: (198, 250), size: (170, 32))]
     #[nwg_events( OnButtonClick: [SettingsWindow::on_close] )]
     cancel_button: nwg::Button,
 
@@ -80,6 +84,14 @@ impl SettingsWindow {
             .set_text(&config.blink_threshold_minutes.to_string());
         self.refresh_input
             .set_text(&config.refresh_interval_minutes.to_string());
+        // Fuente de verdad: el registro, no el config.toml guardado (pudo cambiar por fuera
+        // de la app, ej. desde el Administrador de tareas > Inicio).
+        let state = if autostart::is_enabled() {
+            nwg::CheckBoxState::Checked
+        } else {
+            nwg::CheckBoxState::Unchecked
+        };
+        self.autostart_checkbox.set_check_state(state);
     }
 
     fn on_save(&self) {
@@ -102,12 +114,23 @@ impl SettingsWindow {
             }
         };
 
+        let autostart_checked = self.autostart_checkbox.check_state() == nwg::CheckBoxState::Checked;
+        if let Err(err) = autostart::set_enabled(autostart_checked) {
+            nwg::modal_error_message(
+                &self.window,
+                "No se pudo configurar el autoarranque",
+                &format!("No se pudo escribir en el registro de Windows: {err}"),
+            );
+            return;
+        }
+
         let mut new_config = self.base_config.borrow().clone();
         new_config.ics_feed_url = url;
         new_config.green_threshold_minutes = green;
         new_config.yellow_threshold_minutes = yellow;
         new_config.blink_threshold_minutes = blink;
         new_config.refresh_interval_minutes = refresh;
+        new_config.autostart = autostart_checked;
 
         if let Err(err) = new_config.save() {
             nwg::modal_error_message(
